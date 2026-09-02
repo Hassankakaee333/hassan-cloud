@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import os
@@ -20,9 +19,14 @@ JOB_ID = os.environ["HASSAN_JOB_ID"]
 PROJECT_ID = os.environ["HASSAN_PROJECT_ID"]
 JOB_TYPE = os.environ.get("HASSAN_JOB_TYPE", "coding")
 GITHUB_RUN_ID = os.environ.get("GITHUB_RUN_ID", "")
+RUNNER_MODE = os.environ.get("HASSAN_RUNNER_MODE", "execute")
 
 OUT_DIR = Path("/tmp/hassan-job-out")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+ARTIFACT_DIR = OUT_DIR / "artifacts"
+ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+MANIFEST_PATH = OUT_DIR / "artifact-manifest.json"
+GITHUB_ARTIFACT_NAME = f"hassan-job-{JOB_ID}"
 
 FIXTURE_SOURCE = '''def greet(name: str) -> str:
     return f"hello {name}"
@@ -53,20 +57,46 @@ def update_job(**kwargs) -> None:
     callback(f"/v1/internal/jobs/{JOB_ID}/update", kwargs)
 
 
-def register_artifact(name: str, mime: str, data: bytes) -> None:
+def stage_artifact(name: str, mime: str, data: bytes) -> None:
+    if Path(name).name != name:
+        raise ValueError(f"artifact name must be a filename: {name}")
     digest = hashlib.sha256(data).hexdigest()
-    callback(
-        f"/v1/internal/jobs/{JOB_ID}/artifacts",
+    relative_path = f"artifacts/{name}"
+    (ARTIFACT_DIR / name).write_bytes(data)
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8")) if MANIFEST_PATH.exists() else []
+    manifest.append(
         {
             "name": name,
             "mime_type": mime,
             "size_bytes": len(data),
             "sha256": digest,
-            "storage_backend": "INLINE_POC",
-            "content_base64": base64.b64encode(data).decode("ascii"),
-            "project_id": PROJECT_ID,
-        },
+            "path": relative_path,
+        }
     )
+    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+
+def register_staged_artifacts() -> None:
+    if not GITHUB_RUN_ID:
+        raise RuntimeError("GITHUB_RUN_ID required to register GitHub Actions artifacts")
+    if not MANIFEST_PATH.exists():
+        raise RuntimeError("artifact manifest missing")
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    if not manifest:
+        raise RuntimeError("artifact manifest empty")
+    for item in manifest:
+        callback(
+            f"/v1/internal/jobs/{JOB_ID}/artifacts",
+            {
+                "name": item["name"],
+                "mime_type": item["mime_type"],
+                "size_bytes": item["size_bytes"],
+                "sha256": item["sha256"],
+                "storage_backend": "GITHUB_ACTIONS",
+                "storage_key": f"{GITHUB_RUN_ID}|{GITHUB_ARTIFACT_NAME}|{item['path']}",
+                "project_id": PROJECT_ID,
+            },
+        )
 
 
 def register_agent(agent_role: str, status: str, output: str) -> None:
@@ -115,16 +145,16 @@ def run_coding_job() -> None:
         "stdout": proc.stdout[:2000],
         "github_run_id": GITHUB_RUN_ID,
     }
-    register_artifact("coding-log.txt", "text/plain", (proc.stdout + "\n" + proc.stderr).encode("utf-8"))
-    register_artifact("changes.diff", "text/plain", diff.encode("utf-8"))
-    register_artifact("test-report.json", "application/json", json.dumps(report, indent=2).encode("utf-8"))
+    stage_artifact("coding-log.txt", "text/plain", (proc.stdout + "\n" + proc.stderr).encode("utf-8"))
+    stage_artifact("changes.diff", "text/plain", diff.encode("utf-8"))
+    stage_artifact("test-report.json", "application/json", json.dumps(report, indent=2).encode("utf-8"))
 
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for path in root.rglob("*"):
             if path.is_file() and ".pytest_cache" not in path.parts:
                 zf.write(path, arcname=str(path.relative_to(root)))
-    register_artifact("workspace.zip", "application/zip", buffer.getvalue())
+    stage_artifact("workspace.zip", "application/zip", buffer.getvalue())
 
     update_job(state="VERIFYING", log_append="[gha] verifying\n", checkpoint_stage="verifier_done")
     register_agent("Verifier", "COMPLETE" if proc.returncode == 0 else "FAILED", "Tests verified")
@@ -140,15 +170,92 @@ def run_coding_job() -> None:
         sys.exit(1)
 
     update_job(
+        state="VERIFYING",
+        result_summary="Coding job passed; awaiting durable artifact upload",
+        log_append="[gha] waiting for GitHub artifact upload\n",
+        github_run_id=GITHUB_RUN_ID,
+    )
+
+
+def run_android_build_job() -> None:
+    fixture = Path(__file__).resolve().parents[1] / "fixtures" / "android-sample"
+    update_job(state="RUNNING", log_append="[gha] Android fixture build starting\n", checkpoint_stage="android_build")
+    register_agent("Planner", "COMPLETE", "Android sample fixture selected")
+    proc = subprocess.run(
+        ["gradle", ":app:assembleDebug", "--no-daemon"],
+        cwd=str(fixture),
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    build_log = (proc.stdout + "\n" + proc.stderr).encode("utf-8")
+    stage_artifact("android-build-log.txt", "text/plain", build_log)
+    if proc.returncode != 0:
+        update_job(
+            state="FAILED",
+            failure_reason="Android fixture build failed",
+            result_summary="Android build job failed",
+            log_append=f"[gha] Android Gradle exit={proc.returncode}\n",
+        )
+        sys.exit(1)
+
+    apk = fixture / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
+    if not apk.exists():
+        update_job(state="FAILED", failure_reason="APK output missing")
+        sys.exit(1)
+    apk_data = apk.read_bytes()
+    stage_artifact("hassan-fixture-debug.apk", "application/vnd.android.package-archive", apk_data)
+    stage_artifact(
+        "android-build-report.json",
+        "application/json",
+        json.dumps(
+            {
+                "exit_code": proc.returncode,
+                "apk_size": len(apk_data),
+                "sha256": hashlib.sha256(apk_data).hexdigest(),
+                "github_run_id": GITHUB_RUN_ID,
+            },
+            indent=2,
+        ).encode("utf-8"),
+    )
+    register_agent("Builder", "COMPLETE", "Android sample APK assembled")
+    update_job(
+        state="VERIFYING",
+        result_summary="Android fixture APK built; awaiting durable artifact upload",
+        log_append="[gha] Android APK verified and staged\n",
+        checkpoint_stage="android_artifact_upload",
+    )
+
+
+def finalize_job() -> None:
+    register_staged_artifacts()
+    summary = (
+        "Android fixture APK completed via GitHub Actions"
+        if JOB_TYPE == "android_build"
+        else "Coding job completed via GitHub Actions"
+    )
+    update_job(
         state="COMPLETED",
-        result_summary="Coding job completed via GitHub Actions",
-        log_append="[gha] COMPLETED\n",
+        result_summary=summary,
+        log_append="[gha] durable GitHub artifacts registered; COMPLETED\n",
         checkpoint_stage="completed",
         github_run_id=GITHUB_RUN_ID,
     )
 
 
 def main() -> None:
+    if RUNNER_MODE == "finalize":
+        finalize_job()
+        return
+    if RUNNER_MODE == "failure":
+        update_job(
+            state="FAILED",
+            failure_reason="GitHub Actions workflow or artifact upload failed",
+            result_summary="Cloud job failed before durable artifact registration",
+            log_append="[gha] workflow failure callback\n",
+            github_run_id=GITHUB_RUN_ID,
+        )
+        return
     update_job(
         state="RUNNING",
         log_append=f"[gha] workflow started run={GITHUB_RUN_ID}\n",
@@ -156,6 +263,8 @@ def main() -> None:
     )
     if JOB_TYPE in ("coding", "general"):
         run_coding_job()
+    elif JOB_TYPE == "android_build":
+        run_android_build_job()
     else:
         update_job(state="FAILED", failure_reason=f"unsupported job_type: {JOB_TYPE}")
         sys.exit(1)

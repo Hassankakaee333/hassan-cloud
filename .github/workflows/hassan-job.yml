@@ -35,6 +35,19 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up Java for Android fixture builds
+        if: inputs.job_type == 'android_build'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle for Android fixture builds
+        if: inputs.job_type == 'android_build'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
       - name: Install runner dependencies
         run: pip install -r requirements.txt
 
@@ -56,3 +69,27 @@ jobs:
           path: |
             /tmp/hassan-job-out/**
           if-no-files-found: ignore
+
+      - name: Register durable artifact metadata and complete job
+        if: success()
+        env:
+          HASSAN_JOB_ID: ${{ inputs.job_id }}
+          HASSAN_PROJECT_ID: ${{ inputs.project_id }}
+          HASSAN_JOB_TYPE: ${{ inputs.job_type }}
+          HASSAN_API_URL: ${{ secrets.HASSAN_API_URL }}
+          HASSAN_CALLBACK_SECRET: ${{ secrets.HASSAN_CALLBACK_SECRET }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          HASSAN_RUNNER_MODE: finalize
+        run: python scripts/github_job_runner.py
+
+      - name: Report workflow failure
+        if: failure()
+        env:
+          HASSAN_JOB_ID: ${{ inputs.job_id }}
+          HASSAN_PROJECT_ID: ${{ inputs.project_id }}
+          HASSAN_JOB_TYPE: ${{ inputs.job_type }}
+          HASSAN_API_URL: ${{ secrets.HASSAN_API_URL }}
+          HASSAN_CALLBACK_SECRET: ${{ secrets.HASSAN_CALLBACK_SECRET }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          HASSAN_RUNNER_MODE: failure
+        run: python scripts/github_job_runner.py

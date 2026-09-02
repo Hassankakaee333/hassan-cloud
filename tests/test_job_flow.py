@@ -7,7 +7,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from hassan_cloud.auth.tokens import hash_token
+from hassan_cloud.auth.tokens import auth_dependency, hash_token
 from hassan_cloud.main import app
 from hassan_cloud.storage.repository import DatabaseRepository
 from hassan_cloud.util import new_id, now_ms
@@ -40,11 +40,9 @@ def client(monkeypatch, tmp_path):
     main_mod.job_worker = JobWorker(main_mod.repo, main_mod.files, new_id, now_ms, poll_seconds=0.5)
     main_mod.job_worker.start()
 
-    def _verify_token() -> str:
-        return "test-integration-token"
-
-    app.dependency_overrides[main_mod.verify_token] = _verify_token
-    yield TestClient(app)
+    app.dependency_overrides[main_mod.verify_token] = auth_dependency(main_mod.token_service)
+    with TestClient(app) as test_client:
+        yield test_client
     app.dependency_overrides.clear()
     main_mod.job_worker.stop()
 
@@ -56,7 +54,6 @@ def test_health(client: TestClient):
 
 
 def test_auth_rejects_invalid(client: TestClient):
-    app.dependency_overrides.clear()
     r = client.post("/v1/jobs", headers={"Authorization": "Bearer bad"}, json={})
     assert r.status_code in (401, 403, 422)
 

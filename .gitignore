@@ -14,3 +14,7 @@ worker/node_modules/
 worker/.wrangler/
 .wrangler/
 worker/dist/
+
+# Android build fixture outputs
+fixtures/android-sample/.gradle/
+fixtures/android-sample/app/build/

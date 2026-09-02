@@ -1,5 +1,4 @@
 import { Hono } from "hono";
-import { cors } from "hono/cors";
 import { authMiddleware, callbackAuth } from "./auth";
 import { cancelGitHubRun, dispatchGitHubWorkflow, downloadGitHubArtifactFile, ghHeaders } from "./github";
 import { countActiveTokens, ensureBootstrapToken, healthCheck, hashToken, newId, nowMs, sql } from "./db";
@@ -7,19 +6,13 @@ import type { Env } from "./types";
 
 const app = new Hono<{ Bindings: Env }>();
 
-app.use(
-  "*",
-  cors({
-    origin: (origin) => origin ?? "*",
-    allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
-    allowHeaders: ["Authorization", "Content-Type", "X-Hassan-Callback-Secret"],
-    maxAge: 86400,
-  }),
-);
-
 app.use("*", async (c, next) => {
   await ensureBootstrapToken(c.env);
   await next();
+  c.header("Cache-Control", "private, no-store");
+  c.header("Referrer-Policy", "no-referrer");
+  c.header("X-Content-Type-Options", "nosniff");
+  c.header("X-Frame-Options", "DENY");
 });
 
 // --- Health ---
@@ -216,6 +209,7 @@ app.get("/v1/files/:artifactId", authMiddleware, async (c) => {
   const rows = await db`SELECT * FROM artifacts WHERE id = ${artifactId}`;
   if (rows.length === 0) return c.json({ detail: "artifact not found" }, 404);
   const artifact = rows[0];
+  const safeName = String(artifact.name).replace(/[^a-zA-Z0-9._ -]/g, "_").slice(0, 150) || "artifact.bin";
   if (artifact.storage_backend === "INLINE_POC" && artifact.storage_key) {
     const db = sql(c.env);
     const inline = await db`SELECT data FROM artifact_inline WHERE artifact_id = ${artifactId}`;
@@ -224,7 +218,7 @@ app.get("/v1/files/:artifactId", authMiddleware, async (c) => {
     return new Response(data, {
       headers: {
         "Content-Type": artifact.mime_type,
-        "Content-Disposition": `attachment; filename="${artifact.name}"`,
+        "Content-Disposition": `attachment; filename="${safeName}"`,
       },
     });
   }
@@ -235,7 +229,7 @@ app.get("/v1/files/:artifactId", authMiddleware, async (c) => {
     return new Response(data, {
       headers: {
         "Content-Type": artifact.mime_type,
-        "Content-Disposition": `attachment; filename="${artifact.name}"`,
+        "Content-Disposition": `attachment; filename="${safeName}"`,
       },
     });
   }

@@ -15,7 +15,6 @@ export async function authMiddleware(c: Context<{ Bindings: Env }>, next: Next) 
   if (rows.length === 0) {
     return c.json({ detail: "Invalid or revoked token" }, 403);
   }
-  c.set("tokenHash", tokenHash);
   await next();
 }
 

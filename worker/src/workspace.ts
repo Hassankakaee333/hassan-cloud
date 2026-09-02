@@ -61,7 +61,14 @@ workspaceRoutes.get("/v1/projects/:projectId/files", authMiddleware, async (c) =
   const db = sql(c.env);
   const rows = await db`SELECT path, size_bytes, sha256, updated_at
     FROM workspace_files WHERE project_id = ${projectId} ORDER BY path`;
-  return c.json(rows);
+  return c.json(
+    rows.map((r) => ({
+      path: r.path,
+      size_bytes: Number(r.size_bytes),
+      sha256: r.sha256,
+      updated_at: Number(r.updated_at),
+    })),
+  );
 });
 
 workspaceRoutes.get("/v1/projects/:projectId/file", authMiddleware, async (c) => {
@@ -73,7 +80,14 @@ workspaceRoutes.get("/v1/projects/:projectId/file", authMiddleware, async (c) =>
   const rows = await db`SELECT path, content_base64, size_bytes, sha256, updated_at
     FROM workspace_files WHERE project_id = ${projectId} AND path = ${path}`;
   if (rows.length === 0) return c.json({ detail: "file not found" }, 404);
-  return c.json(rows[0]);
+  const r = rows[0];
+  return c.json({
+    path: r.path,
+    content_base64: r.content_base64,
+    size_bytes: Number(r.size_bytes),
+    sha256: r.sha256,
+    updated_at: Number(r.updated_at),
+  });
 });
 workspaceRoutes.put("/v1/projects/:projectId/files", authMiddleware, async (c) => {
   const projectId = c.req.param("projectId") ?? "";

@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.db
+.env
+.venv/
+venv/
+hassan_cloud.db
+data/
+.pytest_cache/
+*.log

@@ -5,7 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 HASSAN_ENV = "production"
-HASSAN_VERSION = "0.5.0"
+HASSAN_VERSION = "0.6.0"
 GITHUB_REPO = "Hassankakaee333/hassan-cloud"
 GITHUB_WORKFLOW_FILE = "hassan-job.yml"
 ARTIFACT_BACKEND = "GITHUB_ACTIONS"

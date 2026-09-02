@@ -4,6 +4,7 @@ import { cancelGitHubRun, dispatchGitHubWorkflow, downloadGitHubArtifactFile, gh
 import { countActiveTokens, ensureBootstrapToken, healthCheck, hashToken, newId, nowMs, sql } from "./db";
 import { PROVIDERS, providersForCapability } from "./providers";
 import type { Env } from "./types";
+import { workspaceRoutes } from "./workspace";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -15,6 +16,8 @@ app.use("*", async (c, next) => {
   c.header("X-Content-Type-Options", "nosniff");
   c.header("X-Frame-Options", "DENY");
 });
+
+app.route("/", workspaceRoutes);
 
 // --- Health ---
 

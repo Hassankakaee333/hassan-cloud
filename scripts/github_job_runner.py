@@ -13,6 +13,8 @@ from pathlib import Path
 
 import httpx
 
+from persistent_workspace_job import run_persistent_workspace_job
+
 API_URL = os.environ.get("HASSAN_API_URL", "").rstrip("/")
 CALLBACK_SECRET = os.environ.get("HASSAN_CALLBACK_SECRET", "")
 JOB_ID = os.environ["HASSAN_JOB_ID"]
@@ -229,11 +231,12 @@ def run_android_build_job() -> None:
 
 def finalize_job() -> None:
     register_staged_artifacts()
-    summary = (
-        "Android fixture APK completed via GitHub Actions"
-        if JOB_TYPE == "android_build"
-        else "Coding job completed via GitHub Actions"
-    )
+    if JOB_TYPE == "android_build":
+        summary = "Android fixture APK completed via GitHub Actions"
+    elif JOB_TYPE == "workspace_coding":
+        summary = "Persistent workspace coding job completed via GitHub Actions"
+    else:
+        summary = "Coding job completed via GitHub Actions"
     update_job(
         state="COMPLETED",
         result_summary=summary,
@@ -263,6 +266,16 @@ def main() -> None:
     )
     if JOB_TYPE in ("coding", "general"):
         run_coding_job()
+    elif JOB_TYPE == "workspace_coding":
+        run_persistent_workspace_job(
+            job_id=JOB_ID,
+            project_id=PROJECT_ID,
+            github_run_id=GITHUB_RUN_ID,
+            out_dir=OUT_DIR,
+            update_job=update_job,
+            register_agent=register_agent,
+            stage_artifact=stage_artifact,
+        )
     elif JOB_TYPE == "android_build":
         run_android_build_job()
     else:

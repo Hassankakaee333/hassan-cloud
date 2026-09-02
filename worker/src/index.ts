@@ -5,6 +5,7 @@ import { countActiveTokens, ensureBootstrapToken, healthCheck, hashToken, newId,
 import { PROVIDERS, providersForCapability } from "./providers";
 import type { Env } from "./types";
 import { workspaceRoutes } from "./workspace";
+import { chatConfigFlags, resolveChat } from "./chat";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -43,8 +44,13 @@ app.get("/v1/health", async (c) => {
     job_runtime: { mode: "github_actions", status: githubOk ? "WORKING" : "FAILED" },
     artifact_store: c.env.ARTIFACT_BACKEND,
     auth: { active_tokens: tokens, configured: tokens > 0 },
-    openai_configured: false,
-    chat_status: "NOT_CONFIGURED",
+    ...chatConfigFlags(c.env),
+    chat_status:
+      chatConfigFlags(c.env).openai_configured ||
+      chatConfigFlags(c.env).gemini_configured ||
+      chatConfigFlags(c.env).deepseek_configured
+        ? "AVAILABLE"
+        : "LOCAL_FALLBACK",
   });
 });
 
@@ -244,17 +250,21 @@ app.post("/v1/files/upload", authMiddleware, async (c) => {
   return c.json({ detail: "upload via GitHub Actions for POC; direct upload coming soon" }, 501);
 });
 
-// --- Chat (honest fallback) ---
+// --- Chat (natural local fallback until external LLM keys are configured) ---
+
+// --- Chat (real providers when keys configured; weather via Open-Meteo) ---
 
 app.post("/v1/chat", authMiddleware, async (c) => {
-  const body = await c.req.json<{ provider?: string; messages?: Array<{ role: string; content: string }> }>();
-  const last = body.messages?.at(-1)?.content ?? "";
-  return c.json({
-    answer: `Hassan Cloud يعمل.\n\nرسالتك: ${last.slice(0, 200)}\n\nحالة Chat: NOT_CONFIGURED`,
-    provider: body.provider ?? "auto",
-    model: "hassan-honest",
-    status: "NOT_CONFIGURED",
-  });
+  const body = await c.req.json<{
+    provider?: string;
+    messages?: Array<{ role: string; content: string }>;
+  }>();
+  const messages = body.messages ?? [];
+  if (messages.length === 0) {
+    return c.json({ detail: "messages required" }, 400);
+  }
+  const result = await resolveChat(c.env, body.provider, messages);
+  return c.json(result);
 });
 
 // --- Providers / capabilities ---

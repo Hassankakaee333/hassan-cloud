@@ -8,6 +8,11 @@ export type Env = {
   GITHUB_REPO: string;
   GITHUB_WORKFLOW_FILE: string;
   ARTIFACT_BACKEND: string;
+  OPENAI_API_KEY?: string;
+  OPENAI_MODEL?: string;
+  GEMINI_API_KEY?: string;
+  GEMINI_MODEL?: string;
+  DEEPSEEK_API_KEY?: string;
 };
 
 export type JobRow = {

@@ -20,7 +20,7 @@ export const PROVIDERS: ProviderDescriptor[] = [
   },
   {
     id: "github-actions-coding-worker",
-    capabilities: ["coding", "testing", "android_build"],
+    capabilities: ["coding", "testing", "android_build", "candidate_self_improve"],
     status: "WORKING",
     cost_type: "FREE",
     health: "HEALTHY",

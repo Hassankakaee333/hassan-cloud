@@ -18,4 +18,10 @@ describe("free-first provider registry", () => {
       expect.objectContaining({ id: "github-actions-coding-worker", status: "WORKING" }),
     ]);
   });
+
+  it("routes candidate self-improve to GitHub Actions worker", () => {
+    expect(providersForCapability("candidate_self_improve")).toEqual([
+      expect.objectContaining({ id: "github-actions-coding-worker", status: "WORKING" }),
+    ]);
+  });
 });

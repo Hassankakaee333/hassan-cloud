@@ -15,6 +15,8 @@ import httpx
 
 from persistent_workspace_job import run_persistent_workspace_job
 from agentos_android_job import run_agentos_android_job
+from candidate_self_improve_job import run_candidate_self_improve_job
+from workspace_io import fetch_job_context
 
 API_URL = os.environ.get("HASSAN_API_URL", "").rstrip("/")
 CALLBACK_SECRET = os.environ.get("HASSAN_CALLBACK_SECRET", "")
@@ -238,6 +240,8 @@ def finalize_job() -> None:
         summary = "Persistent workspace coding job completed via GitHub Actions"
     elif JOB_TYPE == "agentos_android":
         summary = "HassanTodoBenchmark AgentOS Android job completed via GitHub Actions"
+    elif JOB_TYPE == "candidate_self_improve":
+        summary = "Frishta candidate self-improve APK completed via GitHub Actions"
     else:
         summary = "Coding job completed via GitHub Actions"
     update_job(
@@ -290,6 +294,17 @@ def main() -> None:
             update_job=update_job,
             register_agent=register_agent,
             stage_artifact=stage_artifact,
+        )
+    elif JOB_TYPE == "candidate_self_improve":
+        run_candidate_self_improve_job(
+            job_id=JOB_ID,
+            project_id=PROJECT_ID,
+            github_run_id=GITHUB_RUN_ID,
+            out_dir=OUT_DIR,
+            update_job=update_job,
+            register_agent=register_agent,
+            stage_artifact=stage_artifact,
+            fetch_job_context=fetch_job_context,
         )
     else:
         update_job(state="FAILED", failure_reason=f"unsupported job_type: {JOB_TYPE}")

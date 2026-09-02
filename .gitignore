@@ -8,3 +8,9 @@ hassan_cloud.db
 data/
 .pytest_cache/
 *.log
+
+# Cloudflare Worker
+worker/node_modules/
+worker/.wrangler/
+.wrangler/
+worker/dist/

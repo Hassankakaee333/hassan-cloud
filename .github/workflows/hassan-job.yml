@@ -1,0 +1,58 @@
+name: Hassan Cloud Job
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: Hassan job ID
+        required: true
+        type: string
+      project_id:
+        description: Hassan project ID
+        required: true
+        type: string
+      job_type:
+        description: Job type (coding, general, android_build)
+        required: true
+        type: string
+
+concurrency:
+  group: hassan-job-${{ inputs.job_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runner dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Hassan job
+        env:
+          HASSAN_JOB_ID: ${{ inputs.job_id }}
+          HASSAN_PROJECT_ID: ${{ inputs.project_id }}
+          HASSAN_JOB_TYPE: ${{ inputs.job_type }}
+          HASSAN_API_URL: ${{ secrets.HASSAN_API_URL }}
+          HASSAN_CALLBACK_SECRET: ${{ secrets.HASSAN_CALLBACK_SECRET }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: python scripts/github_job_runner.py
+
+      - name: Upload workspace artifact (backup)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hassan-job-${{ inputs.job_id }}
+          path: |
+            /tmp/hassan-job-out/**
+          if-no-files-found: ignore

@@ -1,0 +1,17 @@
+name = "hassan-cloud"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+HASSAN_ENV = "production"
+HASSAN_VERSION = "0.5.0"
+GITHUB_REPO = "Hassankakaee333/hassan-cloud"
+GITHUB_WORKFLOW_FILE = "hassan-job.yml"
+ARTIFACT_BACKEND = "GITHUB_ACTIONS"
+
+# Secrets (set via `wrangler secret put`):
+# DATABASE_URL
+# GITHUB_TOKEN
+# GITHUB_CALLBACK_SECRET
+# HASSAN_BOOTSTRAP_TOKEN

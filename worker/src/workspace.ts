@@ -6,8 +6,8 @@ import type { Env } from "./types";
 export const workspaceRoutes = new Hono<{ Bindings: Env }>();
 
 const MAX_FILE_BYTES = 512 * 1024;
-const MAX_WORKSPACE_BYTES = 2 * 1024 * 1024;
-const MAX_FILES = 200;
+const MAX_WORKSPACE_BYTES = 5 * 1024 * 1024;
+const MAX_FILES = 300;
 
 function normalizePath(raw: string): string | null {
   const path = raw.trim().replace(/\\/g, "/");

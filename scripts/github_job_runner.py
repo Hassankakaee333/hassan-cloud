@@ -14,6 +14,7 @@ from pathlib import Path
 import httpx
 
 from persistent_workspace_job import run_persistent_workspace_job
+from agentos_android_job import run_agentos_android_job
 
 API_URL = os.environ.get("HASSAN_API_URL", "").rstrip("/")
 CALLBACK_SECRET = os.environ.get("HASSAN_CALLBACK_SECRET", "")
@@ -235,6 +236,8 @@ def finalize_job() -> None:
         summary = "Android fixture APK completed via GitHub Actions"
     elif JOB_TYPE == "workspace_coding":
         summary = "Persistent workspace coding job completed via GitHub Actions"
+    elif JOB_TYPE == "agentos_android":
+        summary = "HassanTodoBenchmark AgentOS Android job completed via GitHub Actions"
     else:
         summary = "Coding job completed via GitHub Actions"
     update_job(
@@ -278,6 +281,16 @@ def main() -> None:
         )
     elif JOB_TYPE == "android_build":
         run_android_build_job()
+    elif JOB_TYPE == "agentos_android":
+        run_agentos_android_job(
+            job_id=JOB_ID,
+            project_id=PROJECT_ID,
+            github_run_id=GITHUB_RUN_ID,
+            out_dir=OUT_DIR,
+            update_job=update_job,
+            register_agent=register_agent,
+            stage_artifact=stage_artifact,
+        )
     else:
         update_job(state="FAILED", failure_reason=f"unsupported job_type: {JOB_TYPE}")
         sys.exit(1)

@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       job_type:
-        description: Job type (coding, general, android_build)
+        description: Job type (coding, general, android_build, workspace_coding, agentos_android)
         required: true
         type: string
 
@@ -27,7 +27,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -35,15 +35,28 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Set up Java for Android fixture builds
-        if: inputs.job_type == 'android_build'
+      - name: Set up Java for Android builds
+        if: inputs.job_type == 'android_build' || inputs.job_type == 'agentos_android'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Gradle for Android fixture builds
-        if: inputs.job_type == 'android_build'
+      - name: Set up Android SDK
+        if: inputs.job_type == 'android_build' || inputs.job_type == 'agentos_android'
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        if: inputs.job_type == 'android_build' || inputs.job_type == 'agentos_android'
+        run: yes | sdkmanager --licenses >/tmp/sdk-licenses.txt || true
+
+      - name: Install Android SDK packages
+        if: inputs.job_type == 'agentos_android'
+        run: |
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Set up Gradle
+        if: inputs.job_type == 'android_build' || inputs.job_type == 'agentos_android'
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"

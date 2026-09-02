@@ -11,9 +11,9 @@ import httpx
 API_URL = os.environ.get("HASSAN_API_URL", "").rstrip("/")
 CALLBACK_SECRET = os.environ.get("HASSAN_CALLBACK_SECRET", "")
 MAX_FILE_BYTES = 512 * 1024
-MAX_WORKSPACE_BYTES = 2 * 1024 * 1024
-MAX_FILES = 200
-IGNORED_PARTS = {".git", ".gradle", "build", "__pycache__", ".pytest_cache"}
+MAX_WORKSPACE_BYTES = 5 * 1024 * 1024
+MAX_FILES = 300
+IGNORED_PARTS = {".git", ".gradle", "build", "__pycache__", ".pytest_cache", ".idea", ".cxx"}
 
 
 def _headers() -> dict[str, str]:
@@ -27,17 +27,24 @@ def _safe_relative(path: str) -> Path:
     if candidate.is_absolute() or ".." in candidate.parts or not candidate.parts:
         raise ValueError(f"unsafe workspace path: {path}")
     return candidate
-def fetch_workspace(project_id: str, root: Path) -> set[str]:
+
+
+def fetch_workspace_optional(project_id: str, root: Path) -> set[str]:
+    """Load persistent workspace files; empty workspace is allowed for first create."""
     response = httpx.get(
         f"{API_URL}/v1/internal/projects/{project_id}/workspace",
         headers=_headers(),
-        timeout=60.0,
+        timeout=120.0,
     )
+    if response.status_code == 404:
+        root.mkdir(parents=True, exist_ok=True)
+        return set()
     response.raise_for_status()
     payload = response.json()
     files = payload.get("files", [])
     if not files:
-        raise RuntimeError("persistent workspace is empty")
+        root.mkdir(parents=True, exist_ok=True)
+        return set()
     if len(files) > MAX_FILES:
         raise RuntimeError("workspace has too many files")
 
@@ -57,6 +64,15 @@ def fetch_workspace(project_id: str, root: Path) -> set[str]:
         destination.write_bytes(data)
         initial_paths.add(relative.as_posix())
     return initial_paths
+
+
+def fetch_workspace(project_id: str, root: Path) -> set[str]:
+    paths = fetch_workspace_optional(project_id, root)
+    if not paths:
+        raise RuntimeError("persistent workspace is empty")
+    return paths
+
+
 def collect_workspace(root: Path) -> tuple[list[dict[str, str]], set[str]]:
     files: list[dict[str, str]] = []
     current_paths: set[str] = set()
@@ -90,7 +106,7 @@ def sync_workspace(project_id: str, root: Path, initial_paths: set[str]) -> dict
         f"{API_URL}/v1/internal/projects/{project_id}/workspace/sync",
         headers=_headers(),
         json={"files": files, "deleted_paths": deleted_paths},
-        timeout=60.0,
+        timeout=180.0,
     )
     response.raise_for_status()
     return response.json()

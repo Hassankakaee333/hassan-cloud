@@ -434,19 +434,37 @@ class TodoStoreLogicTest {
 
 def _goal_requests_datetime_filter(goal: str) -> bool:
     g = goal.lower()
-    keys = ("تاريخ", "وقت", "فلتر", "filter", "created", "غير مكتملة", "مكتملة", "الكل")
-    return sum(1 for k in keys if k in g) >= 2
+    keys = (
+        "تاريخ",
+        "وقت",
+        "فلتر",
+        "filter",
+        "created",
+        "datetime",
+        "timestamp",
+        "createdat",
+        "غير مكتملة",
+        "مكتملة",
+        "الكل",
+        "incomplete",
+        "completed tasks",
+        "todo_filter",
+        "FEATURE_DATETIME_FILTER",
+    )
+    return sum(1 for k in keys if k in goal or k in g) >= 2
 
 
 def _goal_requests_title(goal: str) -> str | None:
     """Extract explicit Arabic title if goal asks to rename the app title."""
+    if "مهام حسن الذكية" in goal or "FEATURE_TITLE_SMART" in goal:
+        return "مهام حسن الذكية"
     m = re.search(r"مهام حسن[^\n\"']{0,40}", goal)
     if not m:
         return None
     title = m.group(0).strip().rstrip(".:،")
-    if "عنوان" in goal or "غيّر" in goal or "غير" in goal or "title" in goal.lower():
+    if any(k in goal for k in ("عنوان", "غيّر", "غير عنوان", "title", "rename")):
         return title
-    if title != "مهام حسن":
+    if title not in ("مهام حسن", "مهام حسن · مستمر"):
         return title
     return None
 

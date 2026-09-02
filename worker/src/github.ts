@@ -81,22 +81,44 @@ export async function downloadGitHubArtifactFile(
   return extractFileFromZip(zipBytes, fileName);
 }
 
-async function extractFileFromZip(zipBytes: ArrayBuffer, fileName: string): Promise<ArrayBuffer | null> {
-  // Minimal ZIP local-header scan for POC (single small files in artifact)
+export async function extractFileFromZip(zipBytes: ArrayBuffer, fileName: string): Promise<ArrayBuffer | null> {
+  // GitHub artifact ZIPs use data descriptors, so sizes in local headers are
+  // commonly zero. The central directory contains the authoritative sizes and
+  // local-header offsets.
   const view = new DataView(zipBytes);
-  let offset = 0;
-  while (offset + 30 < zipBytes.byteLength) {
-    const sig = view.getUint32(offset, true);
-    if (sig !== 0x04034b50) break;
-    const compMethod = view.getUint16(offset + 8, true);
-    const compSize = view.getUint32(offset + 18, true);
-    const nameLen = view.getUint16(offset + 26, true);
-    const extraLen = view.getUint16(offset + 28, true);
-    const nameBytes = new Uint8Array(zipBytes, offset + 30, nameLen);
+  const minimumEocdOffset = Math.max(0, zipBytes.byteLength - 0xffff - 22);
+  let eocdOffset = -1;
+  for (let offset = zipBytes.byteLength - 22; offset >= minimumEocdOffset; offset -= 1) {
+    if (view.getUint32(offset, true) === 0x06054b50) {
+      eocdOffset = offset;
+      break;
+    }
+  }
+  if (eocdOffset < 0) return null;
+
+  const entryCount = view.getUint16(eocdOffset + 10, true);
+  let offset = view.getUint32(eocdOffset + 16, true);
+  for (let entry = 0; entry < entryCount; entry += 1) {
+    if (offset + 46 > zipBytes.byteLength || view.getUint32(offset, true) !== 0x02014b50) return null;
+    const compMethod = view.getUint16(offset + 10, true);
+    const compSize = view.getUint32(offset + 20, true);
+    const nameLen = view.getUint16(offset + 28, true);
+    const extraLen = view.getUint16(offset + 30, true);
+    const commentLen = view.getUint16(offset + 32, true);
+    const localHeaderOffset = view.getUint32(offset + 42, true);
+    const nameBytes = new Uint8Array(zipBytes, offset + 46, nameLen);
     const entryName = new TextDecoder().decode(nameBytes);
-    const dataStart = offset + 30 + nameLen + extraLen;
-    const dataEnd = dataStart + compSize;
     if (entryName === fileName || entryName.endsWith(`/${fileName}`)) {
+      if (
+        localHeaderOffset + 30 > zipBytes.byteLength ||
+        view.getUint32(localHeaderOffset, true) !== 0x04034b50
+      ) {
+        return null;
+      }
+      const localNameLen = view.getUint16(localHeaderOffset + 26, true);
+      const localExtraLen = view.getUint16(localHeaderOffset + 28, true);
+      const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
+      if (dataStart + compSize > zipBytes.byteLength) return null;
       const compressed = new Uint8Array(zipBytes, dataStart, compSize);
       if (compMethod === 0) {
         return compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength);
@@ -106,8 +128,9 @@ async function extractFileFromZip(zipBytes: ArrayBuffer, fileName: string): Prom
         const stream = new Blob([compressed]).stream().pipeThrough(ds);
         return await new Response(stream).arrayBuffer();
       }
+      return null;
     }
-    offset = dataEnd;
+    offset += 46 + nameLen + extraLen + commentLen;
   }
   return null;
 }

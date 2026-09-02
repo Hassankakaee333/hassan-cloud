@@ -69,6 +69,7 @@ jobs:
           path: |
             /tmp/hassan-job-out/**
           if-no-files-found: ignore
+          compression-level: 0
 
       - name: Register durable artifact metadata and complete job
         if: success()

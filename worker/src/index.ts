@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { authMiddleware, callbackAuth } from "./auth";
-import { cancelGitHubRun, dispatchGitHubWorkflow, downloadGitHubArtifactFile } from "./github";
+import { cancelGitHubRun, dispatchGitHubWorkflow, downloadGitHubArtifactFile, ghHeaders } from "./github";
 import { countActiveTokens, ensureBootstrapToken, healthCheck, hashToken, newId, nowMs, sql } from "./db";
 import type { Env } from "./types";
 
@@ -31,7 +31,7 @@ app.get("/v1/health", async (c) => {
   try {
     const [owner, repo] = c.env.GITHUB_REPO.split("/");
     const r = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
-      headers: { Authorization: `Bearer ${c.env.GITHUB_TOKEN}`, Accept: "application/vnd.github+json" },
+      headers: ghHeaders(c.env.GITHUB_TOKEN),
     });
     githubOk = r.ok;
   } catch {
@@ -143,22 +143,23 @@ app.post("/v1/jobs", authMiddleware, async (c) => {
     ${ts}, ${ts}, ${body.idempotency_key ?? null}, ${""}, ${0},
     ${0}, ${c.env.GITHUB_WORKFLOW_FILE}
   )`;
-  let rows = await db`SELECT * FROM jobs WHERE id = ${id}`;
 
-  // Dispatch GitHub Actions
-  await db`UPDATE jobs SET state = ${"DISPATCHING"}, updated_at = ${nowMs()} WHERE id = ${id}`;
-  const dispatch = await dispatchGitHubWorkflow(c.env, id, body.project_id, body.job_type ?? "general");
-  const attempt = 1;
-  const dispatchTs = nowMs();
-  if (dispatch.ok) {
-    await db`UPDATE jobs SET state = ${"QUEUED"}, github_run_id = ${dispatch.runId ?? null},
-      dispatch_attempt = ${attempt}, last_dispatch_at = ${dispatchTs}, updated_at = ${dispatchTs},
-      log = ${"[worker] GitHub Actions dispatched\n"} WHERE id = ${id}`;
-  } else {
-    await db`UPDATE jobs SET state = ${"FAILED"}, failure_reason = ${dispatch.error ?? "dispatch failed"},
-      log = ${`[worker] dispatch failed: ${dispatch.error}\n`}, updated_at = ${dispatchTs} WHERE id = ${id}`;
-  }
-  rows = await db`SELECT * FROM jobs WHERE id = ${id}`;
+  // Dispatch GitHub Actions in background — return immediately to client
+  const dispatchTask = (async () => {
+    await db`UPDATE jobs SET state = ${"DISPATCHING"}, updated_at = ${nowMs()} WHERE id = ${id}`;
+    const dispatch = await dispatchGitHubWorkflow(c.env, id, body.project_id, body.job_type ?? "general");
+    const dispatchTs = nowMs();
+    if (dispatch.ok) {
+      await db`UPDATE jobs SET state = ${"QUEUED"}, dispatch_attempt = ${1}, last_dispatch_at = ${dispatchTs}, updated_at = ${dispatchTs},
+        log = ${"[worker] GitHub Actions dispatched\n"} WHERE id = ${id}`;
+    } else {
+      await db`UPDATE jobs SET state = ${"FAILED"}, failure_reason = ${dispatch.error ?? "dispatch failed"},
+        log = ${`[worker] dispatch failed: ${dispatch.error}\n`}, updated_at = ${dispatchTs} WHERE id = ${id}`;
+    }
+  })();
+  c.executionCtx.waitUntil(dispatchTask);
+
+  const rows = await db`SELECT * FROM jobs WHERE id = ${id}`;
   return c.json(rows[0]);
 });
 

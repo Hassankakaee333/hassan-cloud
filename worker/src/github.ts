@@ -1,5 +1,14 @@
 import type { Env } from "./types";
 
+const GH_HEADERS = (token: string) => ({
+  Authorization: `Bearer ${token}`,
+  Accept: "application/vnd.github+json",
+  "X-GitHub-Api-Version": "2022-11-28",
+  "User-Agent": "HassanCloud-Worker/0.5",
+});
+
+export const ghHeaders = GH_HEADERS;
+
 export async function dispatchGitHubWorkflow(
   env: Env,
   jobId: string,
@@ -11,9 +20,7 @@ export async function dispatchGitHubWorkflow(
   const resp = await fetch(url, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
+      ...GH_HEADERS(env.GITHUB_TOKEN),
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
@@ -25,21 +32,14 @@ export async function dispatchGitHubWorkflow(
     const text = await resp.text();
     return { ok: false, error: `GitHub dispatch ${resp.status}: ${text.slice(0, 300)}` };
   }
-  // GitHub does not return run id from dispatch; poll latest run for branch/workflow
-  await new Promise((r) => setTimeout(r, 2000));
-  const runId = await findLatestRunId(env, jobId);
-  return { ok: true, runId: runId ?? undefined };
+  return { ok: true };
 }
 
 async function findLatestRunId(env: Env, jobId: string): Promise<string | null> {
   const [owner, repo] = env.GITHUB_REPO.split("/");
   const url = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${env.GITHUB_WORKFLOW_FILE}/runs?per_page=5`;
   const resp = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
+    headers: GH_HEADERS(env.GITHUB_TOKEN),
   });
   if (!resp.ok) return null;
   const data = (await resp.json()) as { workflow_runs?: Array<{ id: number; display_title?: string }> };
@@ -52,11 +52,7 @@ export async function cancelGitHubRun(env: Env, runId: string): Promise<boolean>
   const url = `https://api.github.com/repos/${owner}/${repo}/actions/runs/${runId}/cancel`;
   const resp = await fetch(url, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
+    headers: GH_HEADERS(env.GITHUB_TOKEN),
   });
   return resp.ok;
 }
@@ -70,11 +66,7 @@ export async function downloadGitHubArtifactFile(
   const [owner, repo] = env.GITHUB_REPO.split("/");
   const listUrl = `https://api.github.com/repos/${owner}/${repo}/actions/runs/${runId}/artifacts?per_page=20`;
   const listResp = await fetch(listUrl, {
-    headers: {
-      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
+    headers: GH_HEADERS(env.GITHUB_TOKEN),
   });
   if (!listResp.ok) return null;
   const list = (await listResp.json()) as { artifacts?: Array<{ id: number; name: string }> };
@@ -82,11 +74,7 @@ export async function downloadGitHubArtifactFile(
   if (!artifact) return null;
   const zipUrl = `https://api.github.com/repos/${owner}/${repo}/actions/artifacts/${artifact.id}/zip`;
   const zipResp = await fetch(zipUrl, {
-    headers: {
-      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
+    headers: GH_HEADERS(env.GITHUB_TOKEN),
   });
   if (!zipResp.ok) return null;
   const zipBytes = await zipResp.arrayBuffer();

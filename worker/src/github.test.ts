@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { dispatchGitHubWorkflow, extractFileFromZip, ghHeaders } from "./github";
+import { dispatchGitHubWorkflow, downloadGitHubArtifactFile, extractFileFromZip, ghHeaders } from "./github";
 import type { Env } from "./types";
 
 const env: Env = {
@@ -57,6 +57,32 @@ describe("GitHub Actions integration", () => {
     expect(extracted).not.toBeNull();
     expect(new TextDecoder().decode(extracted!)).toBe("durable artifact");
     await expect(extractFileFromZip(zip, "artifacts/missing.zip")).resolves.toBeNull();
+  });
+
+  it("downloads a signed artifact redirect without forwarding the GitHub token", async () => {
+    const fileName = "artifacts/workspace.zip";
+    const zip = buildStoredZipWithDescriptor(fileName, new TextEncoder().encode("from signed storage"));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ artifacts: [{ id: 99, name: "hassan-job-job-1" }] }),
+      )
+      .mockResolvedValueOnce(
+        new Response(null, { status: 302, headers: { Location: "https://signed.example/artifact.zip" } }),
+      )
+      .mockResolvedValueOnce(new Response(zip, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const extracted = await downloadGitHubArtifactFile(
+      env,
+      "run-1",
+      "hassan-job-job-1",
+      fileName,
+    );
+
+    expect(new TextDecoder().decode(extracted!)).toBe("from signed storage");
+    expect(fetchMock.mock.calls[2][0]).toBe("https://signed.example/artifact.zip");
+    expect(fetchMock.mock.calls[2][1]).toEqual({ redirect: "follow" });
   });
 });
 

@@ -68,17 +68,46 @@ export async function downloadGitHubArtifactFile(
   const listResp = await fetch(listUrl, {
     headers: GH_HEADERS(env.GITHUB_TOKEN),
   });
-  if (!listResp.ok) return null;
+  if (!listResp.ok) {
+    console.warn("github_artifact_list_failed", { runId, status: listResp.status });
+    return null;
+  }
   const list = (await listResp.json()) as { artifacts?: Array<{ id: number; name: string }> };
   const artifact = list.artifacts?.find((a) => a.name === artifactName);
-  if (!artifact) return null;
+  if (!artifact) {
+    console.warn("github_artifact_not_found", { runId, artifactName, count: list.artifacts?.length ?? 0 });
+    return null;
+  }
   const zipUrl = `https://api.github.com/repos/${owner}/${repo}/actions/artifacts/${artifact.id}/zip`;
-  const zipResp = await fetch(zipUrl, {
+  let zipResp = await fetch(zipUrl, {
     headers: GH_HEADERS(env.GITHUB_TOKEN),
+    redirect: "manual",
   });
-  if (!zipResp.ok) return null;
+  if (zipResp.status >= 300 && zipResp.status < 400) {
+    const signedUrl = zipResp.headers.get("Location");
+    if (!signedUrl) {
+      console.warn("github_artifact_redirect_missing", { runId, artifactId: artifact.id });
+      return null;
+    }
+    // The signed blob URL authenticates itself. Forwarding the GitHub API
+    // Authorization header to that different host causes a 401 response.
+    zipResp = await fetch(signedUrl, { redirect: "follow" });
+  }
+  if (!zipResp.ok) {
+    console.warn("github_artifact_download_failed", { runId, artifactId: artifact.id, status: zipResp.status });
+    return null;
+  }
   const zipBytes = await zipResp.arrayBuffer();
-  return extractFileFromZip(zipBytes, fileName);
+  const extracted = await extractFileFromZip(zipBytes, fileName);
+  if (!extracted) {
+    console.warn("github_artifact_file_not_found", {
+      runId,
+      artifactId: artifact.id,
+      fileName,
+      zipBytes: zipBytes.byteLength,
+    });
+  }
+  return extracted;
 }
 
 export async function extractFileFromZip(zipBytes: ArrayBuffer, fileName: string): Promise<ArrayBuffer | null> {

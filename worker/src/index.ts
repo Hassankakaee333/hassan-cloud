@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { authMiddleware, callbackAuth } from "./auth";
 import { cancelGitHubRun, dispatchGitHubWorkflow, downloadGitHubArtifactFile, ghHeaders } from "./github";
 import { countActiveTokens, ensureBootstrapToken, healthCheck, hashToken, newId, nowMs, sql } from "./db";
+import { PROVIDERS, providersForCapability } from "./providers";
 import type { Env } from "./types";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -251,6 +252,15 @@ app.post("/v1/chat", authMiddleware, async (c) => {
     model: "hassan-honest",
     status: "NOT_CONFIGURED",
   });
+});
+
+// --- Providers / capabilities ---
+
+app.get("/v1/providers", authMiddleware, (c) => c.json(PROVIDERS));
+
+app.get("/v1/capabilities/:capability", authMiddleware, (c) => {
+  const capability = c.req.param("capability") ?? "";
+  return c.json({ capability, providers: providersForCapability(capability) });
 });
 
 // --- Radar ---

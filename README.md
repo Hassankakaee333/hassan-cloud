@@ -1,53 +1,58 @@
 # Hassan Cloud
 
-Standalone Hassan backend — **not** Hassan Desktop.
+Production backend for Hassan Candidate. It does not contain or replace the Android app.
 
-## Quick start
+## Production stack
+
+- API: Cloudflare Worker in `worker/`
+- Database: Neon PostgreSQL
+- Job runtime: GitHub Actions
+- Artifacts: GitHub Actions Artifacts
+- Public URL: `https://hassan-cloud.hassankakaee333.workers.dev`
+
+`GET /v1/health` reports database, runtime, artifact backend, auth configuration,
+and the honest chat status.
+
+## Verify
 
 ```bash
-cd hassan-cloud
+python -m pytest -q
+cd worker
+npm test
+npm run typecheck
+npx wrangler deploy --dry-run
+```
+
+## Deploy Worker
+
+```bash
+cd worker
+npx wrangler deploy
+```
+
+Required Worker secrets are `DATABASE_URL`, `GITHUB_TOKEN`,
+`GITHUB_CALLBACK_SECRET`, and `HASSAN_BOOTSTRAP_TOKEN`. Never commit their values.
+
+GitHub Actions requires repository secrets `HASSAN_API_URL` and
+`HASSAN_CALLBACK_SECRET`.
+
+## Jobs
+
+- `coding`: builds a sample workspace, runs pytest, and emits diff/report/ZIP evidence.
+- `android_build`: builds the isolated `fixtures/android-sample` project and emits a real APK.
+- The workflow uploads files before registering metadata and marking the job `COMPLETED`.
+
+## Local reference server
+
+The Python FastAPI implementation remains available for local development and
+contract tests. Production uses the Worker/Neon path above.
+
+```bash
 pip install -r requirements.txt
-set HASSAN_API_TOKEN=dev-token-change-me
+set HASSAN_ENV=development
+set HASSAN_DEV_TOKEN=replace-me
 python -m uvicorn hassan_cloud.main:app --host 0.0.0.0 --port 8787
 ```
 
-## Endpoints
-
-- `GET /v1/health`
-- `POST /v1/auth/verify`
-- `POST /v1/chat`
-- `GET/POST /v1/projects`
-- `GET/POST /v1/jobs`, `GET /v1/jobs/{id}`
-- `GET/POST /v1/artifacts`
-- `POST /v1/agents/run`
-- `POST /v1/radar/scan`
-
-## Deploy on Render (stable URL)
-
-1. Push `hassan-cloud/` to GitHub
-2. [render.com](https://render.com) → New → Blueprint → connect repo
-3. Use `render.yaml` — token is auto-generated as `HASSAN_API_TOKEN`
-4. Copy service URL + token into Hassan Android Settings
-
-## Quick public tunnel (testing)
-
-```bash
-# terminal 1
-set HASSAN_API_TOKEN=hassan-phone-token-2026
-python -m uvicorn hassan_cloud.main:app --host 0.0.0.0 --port 8787
-
-# terminal 2 (phone via USB — الأفضل للاختبار الفوري)
-adb reverse tcp:8787 tcp:8787
-# في التطبيق: http://127.0.0.1:8787
-```
-
-```bash
-# أو cloudflared / localtunnel (رابط عام مؤقت)
-cloudflared tunnel --url http://127.0.0.1:8787
-```
-
-## Android settings
-
-- Hassan Cloud URL: `https://your-service.onrender.com` (or tunnel URL)
-- Token: value of `HASSAN_API_TOKEN`
-- Provider: `auto`
+No paid LLM key is configured. R2 is intentionally not enabled because its
+checkout/subscription step conflicts with the project's no-card rule.

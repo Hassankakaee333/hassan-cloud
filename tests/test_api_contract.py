@@ -44,6 +44,8 @@ def test_fastapi_and_worker_share_mobile_api_contract() -> None:
         ("GET", "/v1/artifacts"),
         ("GET", "/v1/files/{}"),
         ("POST", "/v1/chat"),
+        ("GET", "/v1/providers"),
+        ("GET", "/v1/capabilities/{}"),
         ("POST", "/v1/radar/scan"),
         ("GET", "/v1/radar/candidates"),
         ("POST", "/v1/radar/candidates/{}/evaluate"),

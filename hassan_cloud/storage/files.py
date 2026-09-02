@@ -1,11 +1,15 @@
-"""Binary artifact storage — metadata stays in SQLite."""
+"""Binary artifact storage — local filesystem or PostgreSQL blobs."""
 
 from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from ..config import FILE_DIR, ensure_dirs
+
+if TYPE_CHECKING:
+    pass
 
 
 class FileStore:
@@ -30,3 +34,24 @@ class FileStore:
 
     def absolute(self, storage_path: str) -> Path:
         return self.root / storage_path
+
+
+class DbBlobStore:
+    """Store artifact bytes in PostgreSQL — EPHEMERAL on some hosts, durable with managed Postgres."""
+
+    def __init__(self, repo: Any) -> None:
+        self.repo = repo
+
+    def save(self, artifact_id: str, filename: str, data: bytes) -> tuple[str, str, int]:
+        digest = hashlib.sha256(data).hexdigest()
+        self.repo.save_artifact_blob(artifact_id, data)
+        return f"db://{artifact_id}", digest, len(data)
+
+    def read(self, storage_path: str) -> bytes:
+        if not storage_path.startswith("db://"):
+            raise FileNotFoundError(storage_path)
+        aid = storage_path.removeprefix("db://")
+        data = self.repo.read_artifact_blob(aid)
+        if data is None:
+            raise FileNotFoundError(aid)
+        return data

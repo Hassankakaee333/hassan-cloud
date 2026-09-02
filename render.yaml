@@ -11,7 +11,3 @@ services:
         value: /data
       - key: HASSAN_BOOTSTRAP_TOKEN
         generateValue: true
-    disk:
-      name: hassan-data
-      mountPath: /data
-      sizeGB: 1

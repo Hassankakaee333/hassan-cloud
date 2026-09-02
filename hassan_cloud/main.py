@@ -1,4 +1,4 @@
-"""Hassan Cloud v0.2 — durable jobs, secure tokens, portable storage."""
+"""Hassan Cloud v0.4 — host-independent, Leapcell-ready."""
 
 from __future__ import annotations
 
@@ -14,23 +14,35 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from .auth import TokenService, auth_dependency
-from .config import DATA_DIR, DB_PATH, ENV, FILE_DIR, WORKSPACE_DIR, ensure_dirs
+from .config import (
+    ARTIFACT_STORE,
+    DATA_DIR,
+    DB_BACKEND,
+    DB_PATH,
+    ENV,
+    FILE_DIR,
+    JOB_RUNTIME,
+    WORKSPACE_DIR,
+    ensure_dirs,
+)
 from .providers.registry import list_providers, select_for_capability
 from .radar.candidates import seed_radar
-from .storage import DatabaseRepository, FileStore
+from .storage import get_file_store, get_repository
 from .util import new_id, now_ms
+from .workers.dispatcher import JobDispatcher
 from .workers.job_worker import JobWorker
 
 logger = logging.getLogger("hassan.cloud")
 
 ensure_dirs()
-repo = DatabaseRepository()
-files = FileStore()
+repo = get_repository()
+files = get_file_store(repo)
 token_service = TokenService(repo)
 verify_token = auth_dependency(token_service)
 job_worker = JobWorker(repo, files, new_id, now_ms)
+job_dispatcher = JobDispatcher(repo, files, new_id, now_ms)
 
-app = FastAPI(title="Hassan Cloud", version="0.3.0")
+app = FastAPI(title="Hassan Cloud", version="0.4.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -105,20 +117,26 @@ class RadarEvaluateRequest(BaseModel):
 def on_startup() -> None:
     repo.init_schema()
     raw = token_service.bootstrap(new_id, now_ms)
-    if raw and ENV == "development":
+    if raw and ENV == "production":
+        logger.warning("Production bootstrap token created — save from host logs once. len=%d", len(raw))
+    elif raw and ENV == "development":
         logger.warning(
-            "Development bootstrap token created. Save it now — it will not be shown again. "
-            "Length=%d chars",
+            "Development bootstrap token created. Save it now — it will not be shown again. Length=%d chars",
             len(raw),
         )
-    job_worker.start()
+    if JOB_RUNTIME == "thread":
+        job_worker.start()
     seeded = seed_radar(repo, new_id, now_ms)
-    logger.info("Hassan Cloud started env=%s data=%s radar_seeded=%d", ENV, DATA_DIR, seeded)
+    logger.info(
+        "Hassan Cloud started env=%s backend=%s job_runtime=%s artifact_store=%s radar=%d",
+        ENV, DB_BACKEND, JOB_RUNTIME, ARTIFACT_STORE, seeded,
+    )
 
 
 @app.on_event("shutdown")
 def on_shutdown() -> None:
     job_worker.stop()
+    job_dispatcher.shutdown()
 
 
 # --- Health / auth ---
@@ -128,11 +146,19 @@ def on_shutdown() -> None:
 def health() -> dict[str, Any]:
     tokens = repo.list_tokens()
     active = sum(1 for t in tokens if t.get("revoked_at") is None)
+    db_ok = True
+    if hasattr(repo, "health_check"):
+        db_ok = repo.health_check()
+    worker_status = "thread" if JOB_RUNTIME == "thread" else "dispatch"
+    artifact_mode = "EPHEMERAL_DB" if ARTIFACT_STORE == "db" else "LOCAL_FS"
     return {
-        "status": "ok",
+        "status": "ok" if db_ok else "degraded",
         "service": "hassan-cloud",
-        "version": "0.2.0",
+        "version": "0.4.0",
         "env": ENV,
+        "database": {"backend": DB_BACKEND, "status": "WORKING" if db_ok else "FAILED"},
+        "job_runtime": {"mode": worker_status, "status": "WORKING"},
+        "artifact_store": artifact_mode,
         "persistence": {
             "data_dir": str(DATA_DIR),
             "db_path": str(DB_PATH),
@@ -140,7 +166,6 @@ def health() -> dict[str, Any]:
             "workspace_dir": str(WORKSPACE_DIR),
         },
         "auth": {"active_tokens": active, "configured": active > 0},
-        "worker": "running",
         "openai_configured": bool(os.environ.get("OPENAI_API_KEY")),
         "chat_status": "NOT_CONFIGURED" if not os.environ.get("OPENAI_API_KEY") else "AVAILABLE",
     }
@@ -266,7 +291,7 @@ def project_workspace(project_id: str, _token: str = Depends(verify_token)) -> d
 def create_job(body: JobCreate, _token: str = Depends(verify_token)) -> dict[str, Any]:
     if not repo.get_project(body.project_id):
         raise HTTPException(status_code=404, detail="project not found")
-    return repo.create_job(
+    job = repo.create_job(
         new_id(),
         body.project_id,
         body.conversation_id,
@@ -275,6 +300,9 @@ def create_job(body: JobCreate, _token: str = Depends(verify_token)) -> dict[str
         now_ms(),
         idempotency_key=body.idempotency_key,
     )
+    if JOB_RUNTIME == "dispatch":
+        job_dispatcher.enqueue(job["id"])
+    return job
 
 
 @app.get("/v1/jobs")
@@ -287,6 +315,8 @@ def get_job(job_id: str, _token: str = Depends(verify_token)) -> dict[str, Any]:
     job = repo.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
+    if JOB_RUNTIME == "dispatch" and job.get("state") == "QUEUED":
+        job_dispatcher.enqueue(job_id)
     runs = repo.list_agent_runs(job_id)
     return {**job, "agent_runs": runs}
 

@@ -196,29 +196,34 @@ CURRENT FILES:
 
 
 def _call_hassan_cloud_coder(prompt: str) -> dict[str, Any]:
+    """Call Worker codegen using httpx (same stack as job callbacks).
+
+    urllib from GitHub Actions is often blocked by Cloudflare with error 1010.
+    """
     api = (os.environ.get("HASSAN_API_URL") or "").rstrip("/")
     secret = (os.environ.get("HASSAN_CALLBACK_SECRET") or "").strip()
     if not api or not secret:
         raise RuntimeError("HASSAN_API_URL / HASSAN_CALLBACK_SECRET missing for cloud coder")
-    req = urllib.request.Request(
-        f"{api}/v1/internal/codegen",
-        data=json.dumps({"prompt": prompt}).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "X-Hassan-Callback-Secret": secret,
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
-            raw = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="ignore")[:400]
-        raise RuntimeError(f"cloud codegen HTTP {exc.code}: {detail}") from exc
-    data = json.loads(raw)
+        import httpx
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("httpx required for cloud codegen") from exc
+    resp = httpx.post(
+        f"{api}/v1/internal/codegen",
+        json={"prompt": prompt},
+        headers={
+            "X-Hassan-Callback-Secret": secret,
+            "User-Agent": "HassanCloud-GHA-Runner/1.0",
+            "Accept": "application/json",
+        },
+        timeout=180.0,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"cloud codegen HTTP {resp.status_code}: {resp.text[:400]}")
+    data = resp.json()
     answer = str(data.get("answer") or "").strip()
     if not answer:
-        raise RuntimeError(f"cloud codegen empty: {raw[:200]}")
+        raise RuntimeError(f"cloud codegen empty: {resp.text[:200]}")
     return _extract_json_object(answer)
 
 

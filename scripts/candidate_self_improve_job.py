@@ -189,7 +189,7 @@ Rules:
 - For frosted-glass / modern dark UI: edit HassanTheme.kt and top/composer bars in HassanApp.kt
 - Max 6 file operations
 - old must match existing file text exactly when action=replace
-- Always add proper Kotlin imports at the top of the file. Never use invalid FQNs like androidx.compose.ui.Modifier.fillMaxSize — use Modifier.fillMaxSize() with import androidx.compose.foundation.layout.fillMaxSize and import androidx.compose.ui.Modifier.Modifier
+- Always add proper Kotlin imports at the top of the file. Never use invalid FQNs like androidx.compose.ui.Modifier.fillMaxSize — use Modifier.fillMaxSize() with import androidx.compose.foundation.layout.fillMaxSize and import androidx.compose.ui.Modifier
 - After edits the project MUST compile with :app:assembleCandidateDebug
 
 CURRENT FILES:
@@ -204,48 +204,48 @@ def _sanitize_applied_kotlin(root: Path) -> list[str]:
     if not java_root.is_dir():
         return touched
     for path in java_root.rglob("*.kt"):
-        text = path.read_text(encoding="utf-8")
-        original = text
-        text = text.replace(
+        src = path.read_text(encoding="utf-8")
+        original = src
+        src = src.replace(
             "androidx.compose.ui.modifier.fillMaxSize()",
             "Modifier.fillMaxSize()",
         )
-        # Repair truncated import that breaks compilation.
-        text = text.replace(
-            "import androidx.compose.ui.Modifier\n",
-            "import androidx.compose.ui.Modifier.Modifier\n",
+        # This app compiles with package import `import androidx.compose.ui.modifier`.
+        # Converting it to `.Modifier` breaks the build — always normalize back.
+        src = re.sub(
+            r"^import androidx\.compose\.ui\.modifier\.Modifier\s*$",
+            "import androidx.compose.ui.modifier",
+            src,
+            flags=re.M,
         )
-        # Avoid duplicate Modifier imports after repair.
-        while text.count("import androidx.compose.ui.Modifier.Modifier\n") > 1:
-            first = text.find("import androidx.compose.ui.Modifier.Modifier\n")
-            second = text.find("import androidx.compose.ui.Modifier.Modifier\n", first + 1)
-            if second < 0:
-                break
-            text = text[:second] + text[second + len("import androidx.compose.ui.Modifier.Modifier\n") :]
+        has_modifier_import = (
+            re.search(r"^import androidx\.compose\.ui\.modifier\s*$", src, re.M) is not None
+        )
         needs: list[str] = []
-        if re.search(r"\bModifier\.fillMaxSize\s*\(", text):
+        if (
+            re.search(r"\bModifier\.fillMaxSize\s*\(", src)
+            and "import androidx.compose.foundation.layout.fillMaxSize" not in src
+        ):
             needs.append("import androidx.compose.foundation.layout.fillMaxSize")
-            needs.append("import androidx.compose.ui.Modifier.Modifier")
-        if "MaterialTheme." in text and "import androidx.compose.material3.MaterialTheme" not in text:
-            if "androidx.compose.material3.MaterialTheme" not in text:
+        if "MaterialTheme." in src and "import androidx.compose.material3.MaterialTheme" not in src:
+            if "androidx.compose.material3.MaterialTheme" not in src:
                 needs.append("import androidx.compose.material3.MaterialTheme")
-        if re.search(r"(?<!\.)\bSurface\s*\(", text) and "import androidx.compose.material3.Surface" not in text:
-            if "androidx.compose.material3.Surface" not in text:
+        if re.search(r"(?<!\.)\bSurface\s*\(", src) and "import androidx.compose.material3.Surface" not in src:
+            if "androidx.compose.material3.Surface" not in src:
                 needs.append("import androidx.compose.material3.Surface")
-        if re.search(r"\bModifier\.", text) and "import androidx.compose.ui.Modifier.Modifier" not in text:
-            needs.append("import androidx.compose.ui.Modifier.Modifier")
+        if re.search(r"\bModifier\.", src) and not has_modifier_import:
+            needs.append("import androidx.compose.ui.Modifier")
         for imp in needs:
-            if imp not in text:
-                # Insert after package line / existing imports
-                lines = text.splitlines(keepends=True)
+            if imp not in src:
+                lines = src.splitlines(keepends=True)
                 insert_at = 0
                 for i, line in enumerate(lines):
                     if line.startswith("package ") or line.startswith("import "):
                         insert_at = i + 1
                 lines.insert(insert_at, imp + "\n")
-                text = "".join(lines)
-        if text != original:
-            path.write_text(text, encoding="utf-8")
+                src = "".join(lines)
+        if src != original:
+            path.write_text(src, encoding="utf-8")
             touched.append(path.relative_to(root).as_posix())
     return touched
 

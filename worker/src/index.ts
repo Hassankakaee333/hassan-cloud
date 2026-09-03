@@ -1,11 +1,11 @@
 import { Hono } from "hono";
 import { authMiddleware, callbackAuth } from "./auth";
+import { chatConfigFlags, generateCoderText, resolveChat } from "./chat";
 import { cancelGitHubRun, dispatchGitHubWorkflow, downloadGitHubArtifactFile, ghHeaders } from "./github";
 import { countActiveTokens, ensureBootstrapToken, healthCheck, hashToken, newId, nowMs, sql } from "./db";
 import { PROVIDERS, providersForCapability } from "./providers";
 import type { Env } from "./types";
 import { workspaceRoutes } from "./workspace";
-import { chatConfigFlags, resolveChat } from "./chat";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -338,6 +338,17 @@ app.post("/v1/radar/candidates/:candidateId/evaluate", authMiddleware, async (c)
 });
 
 // --- Internal callbacks (GitHub Actions) ---
+
+app.post("/v1/internal/codegen", callbackAuth, async (c) => {
+  const body = await c.req.json<{ prompt?: string }>();
+  const prompt = body.prompt?.trim() ?? "";
+  if (!prompt) return c.json({ detail: "prompt required" }, 400);
+  const result = await generateCoderText(c.env, prompt);
+  if (result.status !== "OK") {
+    return c.json(result, result.status === "NOT_CONFIGURED" ? 503 : 502);
+  }
+  return c.json(result);
+});
 
 app.post("/v1/internal/jobs/:jobId/update", callbackAuth, async (c) => {
   const jobId = c.req.param("jobId");

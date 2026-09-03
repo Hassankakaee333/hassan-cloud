@@ -86,6 +86,9 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
           HASSAN_CANDIDATE_REPO: ${{ vars.HASSAN_CANDIDATE_REPO }}
           CANDIDATE_APP_ROOT: ${{ env.CANDIDATE_APP_ROOT }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          HASSAN_CANDIDATE_TOKEN: ${{ secrets.HASSAN_CANDIDATE_TOKEN }}
         run: python scripts/github_job_runner.py
 
       - name: Upload workspace artifact (backup)

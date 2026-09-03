@@ -1,7 +1,8 @@
 """Build Frishta AI candidate APK for self-improve cloud jobs.
 
-Looks for the real Android app sources, records the improvement goal,
-bumps versionCode, runs assembleCandidateDebug, and stages the APK.
+Clones/finds Android sources, asks Gemini to apply the user's goal as real
+source edits, bumps version, builds assembleCandidateDebug, stages APK.
+Optionally commits+pushes applied changes back to HASSAN_CANDIDATE_REPO.
 """
 
 from __future__ import annotations
@@ -12,9 +13,28 @@ import os
 import re
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
+
+# Files the coder is allowed to touch (relative to Android root).
+EDITABLE_GLOBS = [
+    "app/src/main/java/ai/hassan/app/ui/**/*.kt",
+    "app/src/main/java/ai/hassan/app/ui/theme/**/*.kt",
+    "app/src/main/res/values/*.xml",
+    "app/src/main/res/values-night/*.xml",
+    "docs/*.md",
+]
+
+# Prefer these paths first in the prompt context.
+PRIORITY_FILES = [
+    "app/src/main/java/ai/hassan/app/ui/theme/HassanTheme.kt",
+    "app/src/main/java/ai/hassan/app/ui/HassanApp.kt",
+    "app/src/main/java/ai/hassan/app/MainActivity.kt",
+    "app/build.gradle.kts",
+]
 
 
 def _find_candidate_root() -> Path | None:
@@ -24,7 +44,6 @@ def _find_candidate_root() -> Path | None:
         if (root / "app" / "build.gradle.kts").exists():
             return root
 
-    # Monorepo: hassan-cloud/scripts -> ../../ (Android project root)
     here = Path(__file__).resolve()
     for parent in [here.parents[2], here.parents[1], Path.cwd(), Path.cwd().parent]:
         gradle = parent / "app" / "build.gradle.kts"
@@ -60,11 +79,9 @@ def _bump_version(gradle_file: Path) -> tuple[int, str]:
     old_code = int(code_match.group(1))
     new_code = old_code + 1
     old_name = name_match.group(1) if name_match else "0.0.0"
-    # Keep base name, append selfimprove marker if missing.
     if "+self" in old_name:
         new_name = re.sub(r"\+self\d*", f"+self{new_code}", old_name)
     else:
-        # bump patch-ish: 0.5.10 -> 0.5.11 when numeric end
         parts = old_name.split(".")
         if parts and parts[-1].isdigit():
             parts[-1] = str(int(parts[-1]) + 1)
@@ -77,19 +94,250 @@ def _bump_version(gradle_file: Path) -> tuple[int, str]:
     return new_code, new_name
 
 
-def _append_improve_log(root: Path, job_id: str, goal: str) -> str:
+def _append_improve_log(root: Path, job_id: str, goal: str, applied: list[str]) -> str:
     docs = root / "docs"
     docs.mkdir(parents=True, exist_ok=True)
     path = docs / "SELF_IMPROVE_LOG.md"
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+    files = ", ".join(applied) if applied else "(none — build only)"
     entry = (
         f"\n## {stamp} — job `{job_id}`\n\n"
         f"- Goal: {goal.strip()[:2000]}\n"
-        f"- Note: Cloud self-improve loop recorded this request and rebuilt candidate APK.\n"
+        f"- Applied files: {files}\n"
     )
     prev = path.read_text(encoding="utf-8") if path.exists() else "# Frishta Self-Improve Log\n"
     path.write_text(prev + entry, encoding="utf-8")
     return path.as_posix()
+
+
+def _safe_rel(path: str) -> str | None:
+    p = path.replace("\\", "/").lstrip("./")
+    if ".." in p.split("/") or p.startswith("/") or ":" in p[:3]:
+        return None
+    if not (p.startswith("app/") or p.startswith("docs/")):
+        return None
+    if not (p.endswith(".kt") or p.endswith(".xml") or p.endswith(".md") or p.endswith(".kts")):
+        return None
+    return p
+
+
+def _collect_context_files(root: Path, max_chars: int = 90000) -> dict[str, str]:
+    files: dict[str, str] = {}
+    for rel in PRIORITY_FILES:
+        path = root / rel
+        if path.is_file():
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            files[rel] = text[:45000] if rel.endswith("HassanApp.kt") else text[:20000]
+
+    # Extra UI files (small)
+    ui_root = root / "app/src/main/java/ai/hassan/app/ui"
+    if ui_root.is_dir():
+        for path in sorted(ui_root.rglob("*.kt")):
+            rel = path.relative_to(root).as_posix()
+            if rel in files:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if len(text) > 12000:
+                continue
+            files[rel] = text
+
+    total = 0
+    trimmed: dict[str, str] = {}
+    for rel, text in files.items():
+        if total + len(text) > max_chars:
+            break
+        trimmed[rel] = text
+        total += len(text)
+    return trimmed
+
+
+def _extract_json_object(raw: str) -> dict[str, Any]:
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("Gemini response has no JSON object")
+    return json.loads(text[start : end + 1])
+
+
+def _coder_prompt(goal: str, context_files: dict[str, str]) -> str:
+    file_blocks = "\n\n".join(
+        f"### FILE: {rel}\n```\n{content}\n```" for rel, content in context_files.items()
+    )
+    return f"""You are Frishta's on-device self-improve coder for an Android Kotlin + Jetpack Compose app.
+
+USER GOAL (Arabic or English):
+{goal.strip()[:3000]}
+
+Apply the goal by editing the candidate app sources. Return ONLY one JSON object (no markdown prose):
+{{
+  "summary": "short what you changed",
+  "files": [
+    {{"path": "app/src/main/java/.../File.kt", "action": "write", "content": "full new file content"}},
+    {{"path": "app/src/main/java/.../File.kt", "action": "replace", "old": "exact old snippet", "new": "replacement"}}
+  ]
+}}
+
+Rules:
+- Prefer action=replace for small surgical edits; use write only for new files or full rewrites of smaller files.
+- Allowed paths only under app/ or docs/, extensions .kt .xml .md .kts
+- Do NOT invent fake APK names or break package ai.hassan.app
+- Keep Arabic UI strings RTL-friendly
+- For frosted-glass / modern dark UI: edit HassanTheme.kt and top/composer bars in HassanApp.kt
+- Max 6 file operations
+- old must match existing file text exactly when action=replace
+
+CURRENT FILES:
+{file_blocks}
+"""
+
+
+def _call_hassan_cloud_coder(prompt: str) -> dict[str, Any]:
+    api = (os.environ.get("HASSAN_API_URL") or "").rstrip("/")
+    secret = (os.environ.get("HASSAN_CALLBACK_SECRET") or "").strip()
+    if not api or not secret:
+        raise RuntimeError("HASSAN_API_URL / HASSAN_CALLBACK_SECRET missing for cloud coder")
+    req = urllib.request.Request(
+        f"{api}/v1/internal/codegen",
+        data=json.dumps({"prompt": prompt}).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "X-Hassan-Callback-Secret": secret,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            raw = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")[:400]
+        raise RuntimeError(f"cloud codegen HTTP {exc.code}: {detail}") from exc
+    data = json.loads(raw)
+    answer = str(data.get("answer") or "").strip()
+    if not answer:
+        raise RuntimeError(f"cloud codegen empty: {raw[:200]}")
+    return _extract_json_object(answer)
+
+
+def _call_gemini_direct(prompt: str) -> dict[str, Any]:
+    api_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY missing")
+    model = (os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash-lite").strip()
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        f"?key={api_key}"
+    )
+    body = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 8192},
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            raw = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")[:400]
+        raise RuntimeError(f"Gemini HTTP {exc.code}: {detail}") from exc
+    data = json.loads(raw)
+    parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+    answer = "".join(p.get("text", "") for p in parts).strip()
+    if not answer:
+        raise RuntimeError("Gemini returned empty coder response")
+    return _extract_json_object(answer)
+
+
+def _call_coder(goal: str, context_files: dict[str, str]) -> dict[str, Any]:
+    prompt = _coder_prompt(goal, context_files)
+    errors: list[str] = []
+    # Prefer Hassan Cloud worker (already has GEMINI_API_KEY) — no extra Actions secret.
+    try:
+        return _call_hassan_cloud_coder(prompt)
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"cloud:{exc}")
+    try:
+        return _call_gemini_direct(prompt)
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"direct:{exc}")
+    raise RuntimeError("coder unavailable — " + " | ".join(errors))
+
+
+def _call_gemini(goal: str, context_files: dict[str, str]) -> dict[str, Any]:
+    """Back-compat name used by run_candidate_self_improve_job."""
+    return _call_coder(goal, context_files)
+
+
+def apply_code_ops(root: Path, payload: dict[str, Any]) -> list[str]:
+    """Apply Gemini file ops. Returns list of relative paths touched."""
+    applied: list[str] = []
+    ops = payload.get("files") or []
+    if not isinstance(ops, list):
+        raise RuntimeError("Gemini payload.files must be a list")
+    for op in ops[:6]:
+        if not isinstance(op, dict):
+            continue
+        rel = _safe_rel(str(op.get("path") or ""))
+        if not rel:
+            continue
+        action = str(op.get("action") or "write").lower()
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if action == "write":
+            content = op.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            target.write_text(content, encoding="utf-8")
+            applied.append(rel)
+        elif action == "replace":
+            old = op.get("old")
+            new = op.get("new")
+            if not isinstance(old, str) or not isinstance(new, str) or not old:
+                continue
+            if not target.is_file():
+                continue
+            text = target.read_text(encoding="utf-8")
+            if old not in text:
+                raise RuntimeError(f"replace failed — old snippet not found in {rel}")
+            target.write_text(text.replace(old, new, 1), encoding="utf-8")
+            applied.append(rel)
+    return applied
+
+
+def _push_candidate_changes(root: Path, job_id: str, goal: str, applied: list[str]) -> str:
+    token = (os.environ.get("HASSAN_CANDIDATE_TOKEN") or os.environ.get("GITHUB_TOKEN") or "").strip()
+    repo = (os.environ.get("HASSAN_CANDIDATE_REPO") or "").strip()
+    if not token or not repo or not applied:
+        return "skip-push"
+    if not (root / ".git").exists():
+        return "skip-push-no-git"
+    subprocess.run(["git", "config", "user.email", "frishta-bot@users.noreply.github.com"], cwd=root, check=False)
+    subprocess.run(["git", "config", "user.name", "Frishta Self-Improve"], cwd=root, check=False)
+    subprocess.run(["git", "add", "-A"], cwd=root, check=False)
+    msg = f"self-improve({job_id[:8]}): {goal.strip()[:72]}"
+    commit = subprocess.run(["git", "commit", "-m", msg], cwd=root, capture_output=True, text=True)
+    if commit.returncode != 0:
+        return f"no-commit:{commit.stderr[:120]}"
+    # Ensure remote uses token for private/cross-repo push
+    slug = repo.replace("https://github.com/", "").removesuffix(".git")
+    remote = f"https://x-access-token:{token}@github.com/{slug}.git"
+    push = subprocess.run(
+        ["git", "push", remote, "HEAD:main"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if push.returncode != 0:
+        return f"push-failed:{push.stderr[:200]}"
+    return "pushed"
 
 
 def run_candidate_self_improve_job(
@@ -128,14 +376,47 @@ def run_candidate_self_improve_job(
         raise RuntimeError(msg)
 
     register_agent("Planner", "COMPLETE", f"root={root}; goal={goal[:180]}")
-    log_path = _append_improve_log(root, job_id, goal)
+
+    # --- REAL coding step (Gemini applies the goal) ---
+    update_job(state="CODING", log_append="[gha] collecting sources for Gemini coder\n", checkpoint_stage="coding")
+    context_files = _collect_context_files(root)
+    applied: list[str] = []
+    coder_summary = ""
+    try:
+        payload = _call_gemini(goal, context_files)
+        coder_summary = str(payload.get("summary") or "")
+        applied = apply_code_ops(root, payload)
+        stage_artifact(
+            "candidate-self-improve-patch.json",
+            "application/json",
+            json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+        if not applied:
+            raise RuntimeError("Gemini returned no applicable file operations")
+        register_agent("Coder", "COMPLETE", f"{coder_summary[:160]} files={applied}")
+        update_job(
+            log_append=f"[gha] coder applied {len(applied)} file(s): {', '.join(applied)}\n",
+            checkpoint_stage="code_applied",
+        )
+    except Exception as exc:  # noqa: BLE001 — surface honest failure to phone
+        register_agent("Coder", "FAILED", str(exc)[:300])
+        update_job(
+            state="FAILED",
+            failure_reason="self_improve_code_apply_failed",
+            result_summary=f"تعذر تطبيق التحسين على المصدر: {exc}",
+            log_append=f"[gha] coder failed: {exc}\n",
+        )
+        raise
+
+    push_status = _push_candidate_changes(root, job_id, goal, applied)
+    update_job(log_append=f"[gha] source push: {push_status}\n")
+
+    log_path = _append_improve_log(root, job_id, goal, applied)
     version_code, version_name = _bump_version(root / "app" / "build.gradle.kts")
     update_job(
-        state="CODING",
         log_append=f"[gha] bumped versionCode={version_code} versionName={version_name}; log={log_path}\n",
         checkpoint_stage="version_bumped",
     )
-    register_agent("Coder", "COMPLETE", f"Recorded goal and bumped to {version_name} ({version_code})")
 
     gradlew = root / "gradlew"
     if os.name == "nt":
@@ -157,7 +438,7 @@ def run_candidate_self_improve_job(
         update_job(
             state="FAILED",
             failure_reason="assembleCandidateDebug failed",
-            result_summary="Candidate self-improve build failed — see build log artifact",
+            result_summary="Candidate self-improve build failed after code apply — see build log",
             log_append=f"[gha] assembleCandidateDebug exit={proc.returncode}\n",
         )
         raise RuntimeError("assembleCandidateDebug failed")
@@ -182,6 +463,9 @@ def run_candidate_self_improve_job(
         "job_id": job_id,
         "project_id": project_id,
         "goal": goal,
+        "coder_summary": coder_summary,
+        "applied_files": applied,
+        "push_status": push_status,
         "version_code": version_code,
         "version_name": version_name,
         "apk_name": apk.name,
@@ -193,14 +477,14 @@ def run_candidate_self_improve_job(
     stage_artifact(
         "candidate-self-improve-report.json",
         "application/json",
-        json.dumps(report, indent=2).encode("utf-8"),
+        json.dumps(report, indent=2, ensure_ascii=False).encode("utf-8"),
     )
     register_agent("Builder", "COMPLETE", f"APK {apk.name} size={len(apk_data)}")
     update_job(
         state="VERIFYING",
         result_summary=(
-            f"Candidate self-improve APK ready ({version_name} / {version_code}); "
-            "awaiting durable artifact upload"
+            f"Self-improve applied ({len(applied)} files) → APK {version_name}/{version_code}. "
+            f"{coder_summary[:120]}"
         ),
         log_append="[gha] candidate APK staged\n",
         checkpoint_stage="android_artifact_upload",

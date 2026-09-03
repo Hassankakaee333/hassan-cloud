@@ -264,6 +264,57 @@ async function callGemini(env: Env, messages: ChatMessage[]): Promise<ChatResult
   return { answer, provider: "gemini", model, status: "OK" };
 }
 
+/** Raw Gemini completion for self-improve coder (no chat persona). */
+export async function generateCoderText(env: Env, prompt: string): Promise<ChatResult> {
+  const key = env.GEMINI_API_KEY?.trim();
+  const model = env.GEMINI_MODEL?.trim() || "gemini-3.5-flash-lite";
+  if (!key) {
+    return {
+      answer: "GEMINI_API_KEY not configured on Hassan Cloud worker",
+      provider: "gemini",
+      model,
+      status: "NOT_CONFIGURED",
+    };
+  }
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      systemInstruction: {
+        parts: [
+          {
+            text:
+              "You are a coding agent. Follow the user instructions exactly. " +
+              "When asked for JSON, return ONLY valid JSON with no markdown fences.",
+          },
+        ],
+      },
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.2, maxOutputTokens: 8192 },
+    }),
+  });
+  const raw = await res.text();
+  if (!res.ok) {
+    return {
+      answer: `Gemini coder HTTP ${res.status}: ${raw.slice(0, 240)}`,
+      provider: "gemini",
+      model,
+      status: "ERROR",
+    };
+  }
+  const data = JSON.parse(raw) as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+  };
+  const answer =
+    data.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("").trim() || "";
+  if (!answer) {
+    return { answer: "Empty Gemini coder response", provider: "gemini", model, status: "ERROR" };
+  }
+  return { answer, provider: "gemini", model, status: "OK" };
+}
+
 async function callDeepSeek(env: Env, messages: ChatMessage[]): Promise<ChatResult> {
   const key = env.DEEPSEEK_API_KEY?.trim();
   if (!key) {

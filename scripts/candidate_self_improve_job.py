@@ -210,6 +210,18 @@ def _sanitize_applied_kotlin(root: Path) -> list[str]:
             "androidx.compose.ui.modifier.fillMaxSize()",
             "Modifier.fillMaxSize()",
         )
+        # Repair truncated import that breaks compilation.
+        text = text.replace(
+            "import androidx.compose.ui.Modifier\n",
+            "import androidx.compose.ui.Modifier.Modifier\n",
+        )
+        # Avoid duplicate Modifier imports after repair.
+        while text.count("import androidx.compose.ui.Modifier.Modifier\n") > 1:
+            first = text.find("import androidx.compose.ui.Modifier.Modifier\n")
+            second = text.find("import androidx.compose.ui.Modifier.Modifier\n", first + 1)
+            if second < 0:
+                break
+            text = text[:second] + text[second + len("import androidx.compose.ui.Modifier.Modifier\n") :]
         needs: list[str] = []
         if re.search(r"\bModifier\.fillMaxSize\s*\(", text):
             needs.append("import androidx.compose.foundation.layout.fillMaxSize")

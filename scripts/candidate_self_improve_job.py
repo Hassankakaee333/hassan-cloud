@@ -573,15 +573,29 @@ def run_candidate_self_improve_job(
             log_append=f"[gha] coder applied {len(applied)} file(s): {', '.join(applied)}\n",
             checkpoint_stage="code_applied",
         )
-    except Exception as exc:  # noqa: BLE001 — surface honest failure to phone
-        register_agent("Coder", "FAILED", str(exc)[:300])
-        update_job(
-            state="FAILED",
-            failure_reason="self_improve_code_apply_failed",
-            result_summary=f"تعذر تطبيق التحسين على المصدر: {exc}",
-            log_append=f"[gha] coder failed: {exc}\n",
-        )
-        raise
+    except Exception as exc:  # noqa: BLE001 — try deterministic path before failing the phone job
+        fallback = _deterministic_install_hint_patch(root, goal)
+        if fallback:
+            applied = fallback
+            coder_summary = f"deterministic fallback after coder error: {exc}"[:180]
+            update_job(log_append=f"[gha] coder unavailable/failed ({exc}); applied deterministic fallback: {', '.join(fallback)}\n")
+            sanitized = _sanitize_applied_kotlin(root)
+            if sanitized:
+                applied = list(dict.fromkeys(applied + sanitized))
+            register_agent("Coder", "COMPLETE", f"{coder_summary[:160]} files={applied}")
+            update_job(
+                log_append=f"[gha] coder applied {len(applied)} file(s): {', '.join(applied)}\n",
+                checkpoint_stage="code_applied",
+            )
+        else:
+            register_agent("Coder", "FAILED", str(exc)[:300])
+            update_job(
+                state="FAILED",
+                failure_reason="self_improve_code_apply_failed",
+                result_summary=f"تعذر تطبيق التحسين على المصدر: {exc}",
+                log_append=f"[gha] coder failed: {exc}\n",
+            )
+            raise
 
     push_status = _push_candidate_changes(root, job_id, goal, applied)
     update_job(log_append=f"[gha] source push: {push_status}\n")

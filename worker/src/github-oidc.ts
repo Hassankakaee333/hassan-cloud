@@ -21,9 +21,10 @@ type GitHubOidcClaims = {
   [key: string]: unknown;
 };
 
-type JwksResponse = { keys?: JsonWebKey[] };
+type GitHubJwk = JsonWebKey & { kid?: string };
+type JwksResponse = { keys?: GitHubJwk[] };
 
-let cachedJwks: { at: number; keys: JsonWebKey[] } | null = null;
+let cachedJwks: { at: number; keys: GitHubJwk[] } | null = null;
 
 function decodeBase64UrlBytes(value: string): Uint8Array {
   const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
@@ -55,7 +56,7 @@ export function validateGitHubOidcClaims(
   return true;
 }
 
-async function loadJwks(): Promise<JsonWebKey[]> {
+async function loadJwks(): Promise<GitHubJwk[]> {
   const now = Date.now();
   if (cachedJwks && now - cachedJwks.at < 10 * 60_000) return cachedJwks.keys;
   const response = await fetch(`${GITHUB_OIDC_ISSUER}/.well-known/jwks`);

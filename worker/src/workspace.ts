@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { authMiddleware, callbackAuth } from "./auth";
 import { nowMs, sql } from "./db";
+import { phoneAgentRoutes } from "./phone-agent";
 import type { Env } from "./types";
 
 export const workspaceRoutes = new Hono<{ Bindings: Env }>();
@@ -207,3 +208,5 @@ workspaceRoutes.get("/v1/internal/jobs/:jobId/context", callbackAuth, async (c) 
   if (rows.length === 0) return c.json({ detail: "job not found" }, 404);
   return c.json(rows[0]);
 });
+
+workspaceRoutes.route("/", phoneAgentRoutes);

@@ -351,6 +351,7 @@ def _call_gemini(goal: str, context_files: dict[str, str]) -> dict[str, Any]:
 def apply_code_ops(root: Path, payload: dict[str, Any]) -> list[str]:
     """Apply Gemini file ops. Returns list of relative paths touched."""
     applied: list[str] = []
+    skipped: list[str] = []
     ops = payload.get("files") or []
     if not isinstance(ops, list):
         raise RuntimeError("Gemini payload.files must be a list")
@@ -375,12 +376,18 @@ def apply_code_ops(root: Path, payload: dict[str, Any]) -> list[str]:
             if not isinstance(old, str) or not isinstance(new, str) or not old:
                 continue
             if not target.is_file():
+                skipped.append(f"{rel}:missing-file")
                 continue
             text = target.read_text(encoding="utf-8")
             if old not in text:
-                raise RuntimeError(f"replace failed — old snippet not found in {rel}")
+                # Soft-skip mismatched snippets so partial patches can still build.
+                skipped.append(f"{rel}:old-not-found")
+                continue
             target.write_text(text.replace(old, new, 1), encoding="utf-8")
             applied.append(rel)
+    if skipped:
+        # Stash on payload for logging by caller
+        payload["_skipped_ops"] = skipped
     return applied
 
 
@@ -464,6 +471,9 @@ def run_candidate_self_improve_job(
             "application/json",
             json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
         )
+        skipped = payload.get("_skipped_ops") or []
+        if skipped:
+            update_job(log_append=f"[gha] skipped ops: {', '.join(skipped)}\n")
         if not applied:
             raise RuntimeError("Gemini returned no applicable file operations")
         sanitized = _sanitize_applied_kotlin(root)

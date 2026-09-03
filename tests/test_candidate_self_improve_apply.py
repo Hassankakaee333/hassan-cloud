@@ -22,20 +22,20 @@ def test_apply_write_and_replace(tmp_path: Path):
     (root / "app/src/main/java").mkdir(parents=True)
     target = root / "app/src/main/java/Demo.kt"
     target.write_text("fun a() = 1\n", encoding="utf-8")
-    applied = apply_code_ops(
-        root,
-        {
-            "files": [
-                {"path": "app/src/main/java/Demo.kt", "action": "replace", "old": "1", "new": "2"},
-                {
-                    "path": "docs/NOTE.md",
-                    "action": "write",
-                    "content": "# hi\n",
-                },
-            ]
-        },
-    )
+    payload = {
+        "files": [
+            {"path": "app/src/main/java/Demo.kt", "action": "replace", "old": "1", "new": "2"},
+            {
+                "path": "docs/NOTE.md",
+                "action": "write",
+                "content": "# hi\n",
+            },
+            {"path": "app/src/main/java/Demo.kt", "action": "replace", "old": "NOPE", "new": "x"},
+        ]
+    }
+    applied = apply_code_ops(root, payload)
     assert "app/src/main/java/Demo.kt" in applied
     assert "docs/NOTE.md" in applied
     assert "fun a() = 2" in target.read_text(encoding="utf-8")
     assert (root / "docs/NOTE.md").read_text(encoding="utf-8") == "# hi\n"
+    assert payload.get("_skipped_ops")

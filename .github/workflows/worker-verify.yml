@@ -26,7 +26,10 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: worker/package-lock.json
-      - run: npm ci
+      # The committed lockfile predates workers-types v5. Wrangler's peer on that
+      # types-only package is optional; keep the reproducible lock until the
+      # dedicated typings migration regenerates it.
+      - run: npm ci --legacy-peer-deps
       - run: npm test
       - run: npm run typecheck
       - run: npx wrangler deploy --dry-run

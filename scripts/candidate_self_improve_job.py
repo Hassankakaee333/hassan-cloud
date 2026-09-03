@@ -262,7 +262,18 @@ def _build_fix_prompt(goal: str, build_log: str, context_files: dict[str, str]) 
     )
 
 
+def _ensure_debug_keystore(root: Path) -> None:
+    """Point the runner debug keystore at the committed candidate key so APKs match the phone."""
+    src = root / "app" / "signing" / "candidate-ci.keystore"
+    if not src.is_file():
+        return
+    dest_dir = Path.home() / ".android"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest_dir / "debug.keystore")
+
+
 def _run_assemble(root: Path) -> subprocess.CompletedProcess[str]:
+    _ensure_debug_keystore(root)
     gradlew = root / "gradlew"
     if os.name == "nt":
         cmd = ["cmd", "/c", "gradlew.bat", ":app:assembleCandidateDebug", "--no-daemon"]

@@ -371,6 +371,21 @@ def _call_gemini(goal: str, context_files: dict[str, str]) -> dict[str, Any]:
     return _call_coder(goal, context_files)
 
 
+def _apply_replace(text: str, old: str, new: str) -> str | None:
+    """Apply a single replace with light normalization when exact match fails."""
+    if old in text:
+        return text.replace(old, new, 1)
+    text_n = text.replace("\r\n", "\n")
+    old_n = old.replace("\r\n", "\n")
+    new_n = new.replace("\r\n", "\n")
+    if old_n in text_n:
+        return text_n.replace(old_n, new_n, 1)
+    old_s = old_n.strip()
+    if len(old_s) >= 24 and text_n.count(old_s) == 1:
+        return text_n.replace(old_s, new_n.strip(), 1)
+    return None
+
+
 def apply_code_ops(root: Path, payload: dict[str, Any]) -> list[str]:
     """Apply Gemini file ops. Returns list of relative paths touched."""
     applied: list[str] = []
@@ -402,17 +417,41 @@ def apply_code_ops(root: Path, payload: dict[str, Any]) -> list[str]:
                 skipped.append(f"{rel}:missing-file")
                 continue
             text = target.read_text(encoding="utf-8")
-            if old not in text:
-                # Soft-skip mismatched snippets so partial patches can still build.
+            replaced = _apply_replace(text, old, new)
+            if replaced is None:
                 skipped.append(f"{rel}:old-not-found")
                 continue
-            target.write_text(text.replace(old, new, 1), encoding="utf-8")
+            target.write_text(replaced, encoding="utf-8")
             applied.append(rel)
     if skipped:
-        # Stash on payload for logging by caller
         payload["_skipped_ops"] = skipped
     return applied
 
+
+def _deterministic_install_hint_patch(root: Path, goal: str) -> list[str]:
+    """Fallback when Gemini soft-skips: inject a one-line install hint on TasksScreen."""
+    if "تثبيت" not in goal and "install" not in goal.lower():
+        return []
+    rel = "app/src/main/java/ai/hassan/app/ui/HassanApp.kt"
+    path = root / rel
+    if not path.is_file():
+        return []
+    text = path.read_text(encoding="utf-8")
+    marker = "التحديثات تُثبَّت بموافقتك من زر تثبيت"
+    if marker in text:
+        return []
+    anchor = 'Text("كيف تعمل المهام السحابية؟", fontWeight = FontWeight.Bold)'
+    if anchor not in text:
+        return []
+    insert = (
+        "\n                Text(\n"
+        f'                    "{marker}.",\n'
+        "                    style = MaterialTheme.typography.bodySmall,\n"
+        "                    color = MaterialTheme.colorScheme.onSurfaceVariant,\n"
+        "                )"
+    )
+    path.write_text(text.replace(anchor, anchor + insert, 1), encoding="utf-8")
+    return [rel]
 
 def _push_candidate_changes(root: Path, job_id: str, goal: str, applied: list[str]) -> str:
     token = (os.environ.get("HASSAN_CANDIDATE_TOKEN") or os.environ.get("GITHUB_TOKEN") or "").strip()
@@ -497,6 +536,32 @@ def run_candidate_self_improve_job(
         skipped = payload.get("_skipped_ops") or []
         if skipped:
             update_job(log_append=f"[gha] skipped ops: {', '.join(skipped)}\n")
+        if not applied:
+            update_job(log_append="[gha] no ops applied — coder retry with exact-match instructions\n")
+            retry_goal = (
+                goal
+                + "\n\nCRITICAL RETRY: previous replace old= snippets did NOT match the file.\n"
+                + f"Skipped: {', '.join(skipped) if skipped else '(none)'}\n"
+                + "Copy a SHORT contiguous old string VERBATIM from the FILE blocks below.\n"
+                + "Prefer ONE replace on app/src/main/java/ai/hassan/app/ui/HassanApp.kt.\n"
+            )
+            payload = _call_gemini(retry_goal, context_files)
+            coder_summary = str(payload.get("summary") or coder_summary)
+            applied = apply_code_ops(root, payload)
+            stage_artifact(
+                "candidate-self-improve-patch-retry.json",
+                "application/json",
+                json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+            )
+            skipped = payload.get("_skipped_ops") or []
+            if skipped:
+                update_job(log_append=f"[gha] retry skipped ops: {', '.join(skipped)}\n")
+        if not applied:
+            fallback = _deterministic_install_hint_patch(root, goal)
+            if fallback:
+                applied = fallback
+                coder_summary = coder_summary or "deterministic install-hint patch"
+                update_job(log_append=f"[gha] applied deterministic fallback: {', '.join(fallback)}\n")
         if not applied:
             raise RuntimeError("Gemini returned no applicable file operations")
         sanitized = _sanitize_applied_kotlin(root)

@@ -24,7 +24,7 @@ Phone chat flow:
 | `GEMINI_API_KEY` | Actions secret (optional fallback) | Direct Gemini if Worker codegen unavailable |
 | `GEMINI_MODEL` | Actions/Worker var (optional) | Default `gemini-3.5-flash-lite` |
 | `HASSAN_CANDIDATE_REPO` | Actions var | e.g. `Hassankakaee333/FrishtaAI-candidate` |
-| `HASSAN_CANDIDATE_TOKEN` | Actions secret (optional) | PAT with `contents:write` to push applied changes |
+| `HASSAN_CANDIDATE_TOKEN` | Actions secret (**required for source push**) | PAT/`gh` token with `repo` (or contents:write) on `HASSAN_CANDIDATE_REPO`. Without it jobs report `skip-push-no-token` and improvements are lost on the next build. |
 
 If coding fails, the job **fails honestly** (`self_improve_code_apply_failed`) instead of shipping an unchanged APK.
 

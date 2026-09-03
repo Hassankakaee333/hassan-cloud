@@ -456,8 +456,12 @@ def _deterministic_install_hint_patch(root: Path, goal: str) -> list[str]:
 def _push_candidate_changes(root: Path, job_id: str, goal: str, applied: list[str]) -> str:
     token = (os.environ.get("HASSAN_CANDIDATE_TOKEN") or os.environ.get("GITHUB_TOKEN") or "").strip()
     repo = (os.environ.get("HASSAN_CANDIDATE_REPO") or "").strip()
-    if not token or not repo or not applied:
-        return "skip-push"
+    if not applied:
+        return "skip-push-no-applied"
+    if not repo:
+        return "skip-push-no-repo"
+    if not token:
+        return "skip-push-no-token"
     if not (root / ".git").exists():
         return "skip-push-no-git"
     subprocess.run(["git", "config", "user.email", "frishta-bot@users.noreply.github.com"], cwd=root, check=False)

@@ -67,7 +67,9 @@ jobs:
         with:
           repository: ${{ vars.HASSAN_CANDIDATE_REPO }}
           path: candidate-app
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Prefer PAT so later source-push can write to FrishtaAI-candidate (cross-repo).
+          token: ${{ secrets.HASSAN_CANDIDATE_TOKEN || secrets.GITHUB_TOKEN }}
+          persist-credentials: true
 
       - name: Export CANDIDATE_APP_ROOT when checked out
         if: inputs.job_type == 'candidate_self_improve' && vars.HASSAN_CANDIDATE_REPO != ''
@@ -89,6 +91,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           HASSAN_CANDIDATE_TOKEN: ${{ secrets.HASSAN_CANDIDATE_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python scripts/github_job_runner.py
 
       - name: Upload workspace artifact (backup)

@@ -189,10 +189,78 @@ Rules:
 - For frosted-glass / modern dark UI: edit HassanTheme.kt and top/composer bars in HassanApp.kt
 - Max 6 file operations
 - old must match existing file text exactly when action=replace
+- Always add proper Kotlin imports at the top of the file. Never use invalid FQNs like androidx.compose.ui.Modifier.fillMaxSize — use Modifier.fillMaxSize() with import androidx.compose.foundation.layout.fillMaxSize and import androidx.compose.ui.Modifier.Modifier
+- After edits the project MUST compile with :app:assembleCandidateDebug
 
 CURRENT FILES:
 {file_blocks}
 """
+
+
+def _sanitize_applied_kotlin(root: Path) -> list[str]:
+    """Repair common Gemini Compose mistakes so the APK can compile."""
+    touched: list[str] = []
+    java_root = root / "app/src/main/java"
+    if not java_root.is_dir():
+        return touched
+    for path in java_root.rglob("*.kt"):
+        text = path.read_text(encoding="utf-8")
+        original = text
+        text = text.replace(
+            "androidx.compose.ui.modifier.fillMaxSize()",
+            "Modifier.fillMaxSize()",
+        )
+        needs: list[str] = []
+        if re.search(r"\bModifier\.fillMaxSize\s*\(", text):
+            needs.append("import androidx.compose.foundation.layout.fillMaxSize")
+            needs.append("import androidx.compose.ui.Modifier.Modifier")
+        if "MaterialTheme." in text and "import androidx.compose.material3.MaterialTheme" not in text:
+            if "androidx.compose.material3.MaterialTheme" not in text:
+                needs.append("import androidx.compose.material3.MaterialTheme")
+        if re.search(r"(?<!\.)\bSurface\s*\(", text) and "import androidx.compose.material3.Surface" not in text:
+            if "androidx.compose.material3.Surface" not in text:
+                needs.append("import androidx.compose.material3.Surface")
+        if re.search(r"\bModifier\.", text) and "import androidx.compose.ui.Modifier.Modifier" not in text:
+            needs.append("import androidx.compose.ui.Modifier.Modifier")
+        for imp in needs:
+            if imp not in text:
+                # Insert after package line / existing imports
+                lines = text.splitlines(keepends=True)
+                insert_at = 0
+                for i, line in enumerate(lines):
+                    if line.startswith("package ") or line.startswith("import "):
+                        insert_at = i + 1
+                lines.insert(insert_at, imp + "\n")
+                text = "".join(lines)
+        if text != original:
+            path.write_text(text, encoding="utf-8")
+            touched.append(path.relative_to(root).as_posix())
+    return touched
+
+
+def _build_fix_prompt(goal: str, build_log: str, context_files: dict[str, str]) -> str:
+    errors = "\n".join(
+        line for line in build_log.splitlines() if "e: file://" in line or "Unresolved" in line or "error:" in line
+    )[:4000]
+    return _coder_prompt(
+        goal
+        + "\n\nPREVIOUS BUILD FAILED. Fix ONLY the compile errors below. Prefer action=replace.\n"
+        + errors,
+        context_files,
+    )
+
+
+def _run_assemble(root: Path) -> subprocess.CompletedProcess[str]:
+    gradlew = root / "gradlew"
+    if os.name == "nt":
+        cmd = ["cmd", "/c", "gradlew.bat", ":app:assembleCandidateDebug", "--no-daemon"]
+    else:
+        if gradlew.exists():
+            gradlew.chmod(gradlew.stat().st_mode | 0o111)
+            cmd = [str(gradlew), ":app:assembleCandidateDebug", "--no-daemon"]
+        else:
+            cmd = ["gradle", ":app:assembleCandidateDebug", "--no-daemon"]
+    return subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, timeout=1200)
 
 
 def _call_hassan_cloud_coder(prompt: str) -> dict[str, Any]:
@@ -398,6 +466,10 @@ def run_candidate_self_improve_job(
         )
         if not applied:
             raise RuntimeError("Gemini returned no applicable file operations")
+        sanitized = _sanitize_applied_kotlin(root)
+        if sanitized:
+            applied = list(dict.fromkeys(applied + sanitized))
+            update_job(log_append=f"[gha] sanitized kotlin imports/FQNs: {', '.join(sanitized)}\n")
         register_agent("Coder", "COMPLETE", f"{coder_summary[:160]} files={applied}")
         update_job(
             log_append=f"[gha] coder applied {len(applied)} file(s): {', '.join(applied)}\n",
@@ -423,27 +495,47 @@ def run_candidate_self_improve_job(
         checkpoint_stage="version_bumped",
     )
 
-    gradlew = root / "gradlew"
-    if os.name == "nt":
-        cmd = ["cmd", "/c", "gradlew.bat", ":app:assembleCandidateDebug", "--no-daemon"]
-    else:
-        if gradlew.exists():
-            gradlew.chmod(gradlew.stat().st_mode | 0o111)
-            cmd = [str(gradlew), ":app:assembleCandidateDebug", "--no-daemon"]
-        else:
-            cmd = ["gradle", ":app:assembleCandidateDebug", "--no-daemon"]
-
     update_job(state="RUNNING", log_append="[gha] assembleCandidateDebug starting\n", checkpoint_stage="building")
-    proc = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, timeout=1200)
+    _sanitize_applied_kotlin(root)
+    proc = _run_assemble(root)
+    if proc.returncode != 0:
+        update_job(log_append="[gha] first build failed — sanitize + one coder retry\n")
+        _sanitize_applied_kotlin(root)
+        try:
+            fix_payload = _call_coder(
+                goal
+                + "\n\nFIX COMPILE ERRORS ONLY. Prefer replace. Build log errors:\n"
+                + "\n".join(
+                    line
+                    for line in (proc.stdout + "\n" + proc.stderr).splitlines()
+                    if "e: file://" in line or "Unresolved" in line or "error:" in line.lower()
+                )[:3500],
+                _collect_context_files(root),
+            )
+            more = apply_code_ops(root, fix_payload)
+            applied = list(dict.fromkeys(applied + more))
+            _sanitize_applied_kotlin(root)
+            update_job(log_append=f"[gha] retry coder fixed files: {', '.join(more) if more else '(none)'}\n")
+        except Exception as retry_exc:  # noqa: BLE001
+            update_job(log_append=f"[gha] retry coder skipped: {retry_exc}\n")
+        proc = _run_assemble(root)
+
     build_log = (proc.stdout + "\n" + proc.stderr).encode("utf-8")
     stage_artifact("candidate-self-improve-build-log.txt", "text/plain", build_log)
 
     if proc.returncode != 0:
         register_agent("Builder", "FAILED", f"assembleCandidateDebug exit={proc.returncode}")
+        # Include last compile errors in phone-visible summary
+        err_lines = [
+            line for line in (proc.stdout + "\n" + proc.stderr).splitlines() if "e: file://" in line or "Unresolved" in line
+        ][:6]
         update_job(
             state="FAILED",
             failure_reason="assembleCandidateDebug failed",
-            result_summary="Candidate self-improve build failed after code apply — see build log",
+            result_summary=(
+                "Candidate self-improve build failed after code apply — "
+                + ("; ".join(err_lines) if err_lines else "see build log")
+            )[:500],
             log_append=f"[gha] assembleCandidateDebug exit={proc.returncode}\n",
         )
         raise RuntimeError("assembleCandidateDebug failed")

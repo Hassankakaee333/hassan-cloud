@@ -21,6 +21,20 @@ jobs:
           python-version: "3.12"
       - name: Compile runner Python
         run: python -m compileall -q scripts hassan_cloud
+      - name: Install Codex SDK for API-shape validation only
+        run: pip install openai-codex
+      - name: Verify Codex SDK surface without login or execution
+        run: |
+          python - <<'PY'
+          from openai_codex import Codex, CodexConfig, Sandbox
+
+          assert hasattr(Codex, "login_chatgpt_device_code")
+          assert hasattr(Codex, "thread_start")
+          assert hasattr(Codex, "logout")
+          CodexConfig(cwd=".", env={"CODEX_HOME": "/tmp/codex-sdk-shape-check"})
+          assert Sandbox.workspace_write is not None
+          print("Codex SDK API shape: PASS (no login, no model execution)")
+          PY
       - name: Verify manual Codex path guard without invoking Codex
         run: |
           python - <<'PY'

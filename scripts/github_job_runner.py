@@ -158,7 +158,7 @@ def run_coding_job() -> None:
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for path in root.rglob("*"):
-            if path.is_file() && ".pytest_cache" not in path.parts:
+            if path.is_file() and ".pytest_cache" not in path.parts:
                 zf.write(path, arcname=str(path.relative_to(root)))
     stage_artifact("workspace.zip", "application/zip", buffer.getvalue())
 

@@ -245,6 +245,11 @@ def finalize_job() -> None:
         summary = "Frishta candidate self-improve APK completed via GitHub Actions"
     elif JOB_TYPE == "codex_candidate_self_improve":
         summary = "Frishta candidate manual Codex self-improve APK completed via GitHub Actions"
+        quota_summary_path = OUT_DIR / "codex-quota-summary.txt"
+        if quota_summary_path.exists():
+            quota_summary = quota_summary_path.read_text(encoding="utf-8").strip()
+            if quota_summary:
+                summary += f" — {quota_summary}"
     else:
         summary = "Coding job completed via GitHub Actions"
     update_job(

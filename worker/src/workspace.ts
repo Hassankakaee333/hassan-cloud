@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { authMiddleware, callbackAuth } from "./auth";
-import { nowMs, sql } from "./db";
+import { newId, nowMs, sql } from "./db";
+import { dispatchGitHubWorkflow } from "./github";
 import { phoneAgentRoutes } from "./phone-agent";
 import type { Env } from "./types";
 
@@ -9,6 +10,7 @@ export const workspaceRoutes = new Hono<{ Bindings: Env }>();
 const MAX_FILE_BYTES = 512 * 1024;
 const MAX_WORKSPACE_BYTES = 5 * 1024 * 1024;
 const MAX_FILES = 300;
+const MANUAL_CODEX_JOB = "codex_candidate_self_improve";
 
 function normalizePath(raw: string): string | null {
   const path = raw.trim().replace(/\\/g, "/");
@@ -48,11 +50,91 @@ async function ensureWorkspaceSchema(env: Env): Promise<void> {
     ON workspace_files(project_id)`;
 }
 
+async function ensureJobRuntimeColumns(env: Env): Promise<void> {
+  const db = sql(env);
+  await db`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS provider_model TEXT`;
+  await db`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS provider_mode TEXT`;
+}
+
 async function projectExists(env: Env, projectId: string): Promise<boolean> {
   const db = sql(env);
   const rows = await db`SELECT id FROM projects WHERE id = ${projectId}`;
   return rows.length > 0;
 }
+
+// The general job endpoint is defined by the parent app. Intercept only the
+// manual Codex execution type here so accidental Auto/text routing cannot
+// dispatch it. The dedicated /v1/runtime-jobs path below is the only accepted
+// client route for Codex execution metadata.
+workspaceRoutes.post("/v1/jobs", authMiddleware, async (c, next) => {
+  const body = (await c.req.raw.clone().json()) as { job_type?: string };
+  if (body.job_type === MANUAL_CODEX_JOB) {
+    return c.json(
+      { detail: "manual Codex execution must use /v1/runtime-jobs after explicit selection" },
+      409,
+    );
+  }
+  await next();
+});
+
+workspaceRoutes.post("/v1/runtime-jobs", authMiddleware, async (c) => {
+  const body = await c.req.json<{
+    project_id: string;
+    conversation_id?: string;
+    goal: string;
+    job_type: string;
+    idempotency_key?: string;
+    provider_model?: string;
+    provider_mode?: string;
+  }>();
+  if (body.job_type !== MANUAL_CODEX_JOB) {
+    return c.json({ detail: "runtime-jobs currently accepts manual Codex execution only" }, 400);
+  }
+  if (!body.project_id || !body.goal) {
+    return c.json({ detail: "project_id and goal required" }, 400);
+  }
+  await ensureJobRuntimeColumns(c.env);
+  if (!(await projectExists(c.env, body.project_id))) {
+    return c.json({ detail: "project not found" }, 404);
+  }
+
+  const db = sql(c.env);
+  if (body.idempotency_key) {
+    const existing = await db`SELECT * FROM jobs WHERE idempotency_key = ${body.idempotency_key}`;
+    if (existing.length > 0) return c.json(existing[0]);
+  }
+
+  const id = newId();
+  const ts = nowMs();
+  await db`INSERT INTO jobs (
+    id, project_id, conversation_id, goal, job_type, state, result_summary, log,
+    created_at, updated_at, idempotency_key, checkpoint_stage, cancel_requested,
+    dispatch_attempt, github_workflow, provider_model, provider_mode
+  ) VALUES (
+    ${id}, ${body.project_id}, ${body.conversation_id ?? null}, ${body.goal},
+    ${body.job_type}, ${"QUEUED"}, ${null}, ${""},
+    ${ts}, ${ts}, ${body.idempotency_key ?? null}, ${""}, ${0},
+    ${0}, ${c.env.GITHUB_WORKFLOW_FILE}, ${body.provider_model ?? null}, ${body.provider_mode ?? null}
+  )`;
+
+  const dispatchTask = (async () => {
+    await db`UPDATE jobs SET state = ${"DISPATCHING"}, updated_at = ${nowMs()} WHERE id = ${id}`;
+    const dispatch = await dispatchGitHubWorkflow(c.env, id, body.project_id, body.job_type);
+    const dispatchTs = nowMs();
+    if (dispatch.ok) {
+      await db`UPDATE jobs SET state = ${"QUEUED"}, dispatch_attempt = ${1}, last_dispatch_at = ${dispatchTs}, updated_at = ${dispatchTs},
+        log = ${"[worker] runtime job dispatched to GitHub Actions\n"} WHERE id = ${id}`;
+    } else {
+      await db`UPDATE jobs SET state = ${"FAILED"}, failure_reason = ${dispatch.error ?? "dispatch failed"},
+        log = ${`[worker] runtime dispatch failed: ${dispatch.error}\n`}, updated_at = ${dispatchTs} WHERE id = ${id}`;
+    }
+  })();
+  c.executionCtx.waitUntil(dispatchTask);
+
+  const rows = await db`SELECT * FROM jobs WHERE id = ${id}`;
+  return c.json(rows[0]);
+});
+
 workspaceRoutes.get("/v1/projects/:projectId/files", authMiddleware, async (c) => {
   const projectId = c.req.param("projectId") ?? "";
   await ensureWorkspaceSchema(c.env);
@@ -202,8 +284,10 @@ workspaceRoutes.post("/v1/internal/projects/:projectId/workspace/sync", callback
 });
 workspaceRoutes.get("/v1/internal/jobs/:jobId/context", callbackAuth, async (c) => {
   const jobId = c.req.param("jobId") ?? "";
+  await ensureJobRuntimeColumns(c.env);
   const db = sql(c.env);
-  const rows = await db`SELECT id, project_id, goal, job_type, state, checkpoint_stage, cancel_requested
+  const rows = await db`SELECT id, project_id, goal, job_type, state, checkpoint_stage, cancel_requested,
+    provider_model, provider_mode
     FROM jobs WHERE id = ${jobId}`;
   if (rows.length === 0) return c.json({ detail: "job not found" }, 404);
   return c.json(rows[0]);

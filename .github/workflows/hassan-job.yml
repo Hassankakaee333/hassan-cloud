@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       job_type:
-        description: Job type (coding, general, android_build, workspace_coding, agentos_android, candidate_self_improve, codex_candidate_self_improve)
+        description: Job type (coding, general, android_build, workspace_coding, agentos_android, candidate_self_improve, codex_candidate_self_improve, codex_account_snapshot)
         required: true
         type: string
 
@@ -75,7 +75,7 @@ jobs:
         run: echo "CANDIDATE_APP_ROOT=${GITHUB_WORKSPACE}/candidate-app" >> "$GITHUB_ENV"
 
       - name: Restore encrypted Codex session cache
-        if: inputs.job_type == 'codex_candidate_self_improve'
+        if: inputs.job_type == 'codex_candidate_self_improve' || inputs.job_type == 'codex_account_snapshot'
         uses: actions/cache@v4
         with:
           path: /tmp/hassan-codex-session
@@ -86,14 +86,18 @@ jobs:
       - name: Install runner dependencies
         run: pip install -r requirements.txt
 
-      - name: Install Codex SDK and CLI only for an explicitly selected Codex job
+      - name: Install Codex Python SDK only for explicit execution
         if: inputs.job_type == 'codex_candidate_self_improve'
+        run: pip install openai-codex
+
+      - name: Install Codex CLI for account runtime or explicit execution
+        if: inputs.job_type == 'codex_candidate_self_improve' || inputs.job_type == 'codex_account_snapshot'
         run: |
-          pip install openai-codex
           npm install -g @openai/codex
           codex --version
 
       - name: Run Hassan job
+        if: inputs.job_type != 'codex_account_snapshot'
         env:
           HASSAN_JOB_ID: ${{ inputs.job_id }}
           HASSAN_PROJECT_ID: ${{ inputs.project_id }}
@@ -110,6 +114,18 @@ jobs:
           CODEX_SESSION_CACHE: /tmp/hassan-codex-session/codex-session.enc
         run: python scripts/github_job_runner.py
 
+      - name: Read Codex account snapshot without a model turn
+        if: inputs.job_type == 'codex_account_snapshot'
+        env:
+          HASSAN_JOB_ID: ${{ inputs.job_id }}
+          HASSAN_PROJECT_ID: ${{ inputs.project_id }}
+          HASSAN_JOB_TYPE: ${{ inputs.job_type }}
+          HASSAN_API_URL: ${{ secrets.HASSAN_API_URL }}
+          HASSAN_CALLBACK_SECRET: ${{ secrets.HASSAN_CALLBACK_SECRET }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          CODEX_SESSION_CACHE: /tmp/hassan-codex-session/codex-session.enc
+        run: python scripts/codex_account_snapshot_runner.py
+
       - name: Upload workspace artifact (backup)
         if: always()
         uses: actions/upload-artifact@v4
@@ -120,8 +136,20 @@ jobs:
           if-no-files-found: ignore
           compression-level: 0
 
+      - name: Finalize Codex account snapshot after upload
+        if: success() && inputs.job_type == 'codex_account_snapshot'
+        env:
+          HASSAN_JOB_ID: ${{ inputs.job_id }}
+          HASSAN_PROJECT_ID: ${{ inputs.project_id }}
+          HASSAN_JOB_TYPE: ${{ inputs.job_type }}
+          HASSAN_API_URL: ${{ secrets.HASSAN_API_URL }}
+          HASSAN_CALLBACK_SECRET: ${{ secrets.HASSAN_CALLBACK_SECRET }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          HASSAN_RUNNER_MODE: finalize
+        run: python scripts/codex_account_snapshot_runner.py
+
       - name: Register durable artifact metadata and complete job
-        if: success()
+        if: success() && inputs.job_type != 'codex_account_snapshot'
         env:
           HASSAN_JOB_ID: ${{ inputs.job_id }}
           HASSAN_PROJECT_ID: ${{ inputs.project_id }}

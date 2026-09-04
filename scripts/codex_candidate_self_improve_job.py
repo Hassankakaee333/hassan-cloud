@@ -212,12 +212,72 @@ def _format_codex_quota(snapshot: dict) -> str:
     return "رصيد Codex المتبقي: " + " | ".join(parts) if parts else "لم يرسل OpenAI نسبة رصيد متبقٍ لهذه الجلسة."
 
 
+def _catalog_data(response: object) -> list[dict]:
+    if hasattr(response, "model_dump"):
+        raw = response.model_dump(mode="json", by_alias=True)
+    elif isinstance(response, dict):
+        raw = response
+    else:
+        raw = {}
+    data = raw.get("data") if isinstance(raw, dict) else None
+    return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+
+
+def _resolve_runtime_selection(
+    catalog: list[dict],
+    requested_model: object,
+    requested_mode: object,
+) -> tuple[str | None, str | None]:
+    model_id = requested_model.strip() if isinstance(requested_model, str) else ""
+    mode_id = requested_mode.strip() if isinstance(requested_mode, str) else ""
+    if len(model_id) > 200 or len(mode_id) > 100:
+        raise RuntimeError("Codex runtime selection is unreasonably long")
+    if not model_id:
+        if mode_id:
+            raise RuntimeError("Codex reasoning selection requires an explicit account model")
+        return None, None
+
+    selected = next(
+        (
+            item for item in catalog
+            if str(item.get("id") or "") == model_id or str(item.get("model") or "") == model_id
+        ),
+        None,
+    )
+    if selected is None:
+        raise RuntimeError(f"Selected Codex model is no longer available to this account: {model_id}")
+    if bool(selected.get("hidden")):
+        raise RuntimeError(f"Selected Codex model is hidden and cannot be used: {model_id}")
+
+    supported: set[str] = set()
+    efforts = selected.get("supportedReasoningEfforts")
+    if isinstance(efforts, list):
+        for effort in efforts:
+            if isinstance(effort, str) and effort.strip():
+                supported.add(effort.strip())
+            elif isinstance(effort, dict):
+                value = effort.get("reasoningEffort") or effort.get("effort") or effort.get("id")
+                if isinstance(value, str) and value.strip():
+                    supported.add(value.strip())
+    if mode_id and mode_id not in supported:
+        raise RuntimeError(
+            f"Selected Codex reasoning mode is no longer available for {model_id}: {mode_id}"
+        )
+
+    wire_model = str(selected.get("model") or selected.get("id") or "").strip()
+    if not wire_model:
+        raise RuntimeError(f"Selected Codex model has no executable model id: {model_id}")
+    return wire_model, mode_id or None
+
+
 def _run_codex_edit(
     *,
     root: Path,
     goal: str,
     update_job: Callable[..., None],
     register_agent: Callable[[str, str, str], None],
+    requested_model: str | None = None,
+    requested_mode: str | None = None,
 ) -> tuple[list[str], str, dict]:
     try:
         from openai_codex import Codex, CodexConfig, Sandbox
@@ -295,6 +355,22 @@ def _run_codex_edit(
                     if auth_persisted:
                         update_job(log_append="[codex] authenticated CODEX_HOME encrypted to persistent cache\n")
 
+            resolved_model: str | None = None
+            resolved_mode: str | None = None
+            if requested_model or requested_mode:
+                catalog = _catalog_data(codex.models())
+                resolved_model, resolved_mode = _resolve_runtime_selection(
+                    catalog,
+                    requested_model,
+                    requested_mode,
+                )
+                update_job(
+                    log_append=(
+                        f"[codex] verified account runtime selection model={resolved_model} "
+                        f"reasoning={resolved_mode or 'provider-default'}\n"
+                    ),
+                )
+
             quota_before: dict = {}
             quota_before_text = ""
             try:
@@ -331,11 +407,16 @@ Rules you MUST follow:
 - Finish with a concise summary of what you changed and what should be tested.
 """
 
-            thread = codex.thread_start(
-                cwd=str(root),
-                sandbox=Sandbox.workspace_write,
-                ephemeral=True,
-            )
+            thread_kwargs: dict[str, object] = {
+                "cwd": str(root),
+                "sandbox": Sandbox.workspace_write,
+                "ephemeral": True,
+            }
+            if resolved_model:
+                thread_kwargs["model"] = resolved_model
+            if resolved_mode:
+                thread_kwargs["config"] = {"model_reasoning_effort": resolved_mode}
+            thread = codex.thread_start(**thread_kwargs)
             result = thread.run(prompt, sandbox=Sandbox.workspace_write)
             final_response = str(result.final_response or "")
             usage = getattr(result, "usage", None)
@@ -355,6 +436,10 @@ Rules you MUST follow:
                 "quota_summary": quota_summary,
                 "auth_reused": auth_reused,
                 "auth_persisted_encrypted": auth_persisted or auth_reused,
+                "requested_model": requested_model,
+                "requested_mode": requested_mode,
+                "resolved_model": resolved_model,
+                "resolved_mode": resolved_mode,
             }
     finally:
         if session_cache is not None and callback_secret and codex_home.exists():
@@ -392,6 +477,12 @@ def run_codex_candidate_self_improve_job(
 ) -> None:
     context = fetch_job_context(job_id)
     goal = str(context.get("goal") or "Frishta candidate self-improve via Codex")
+    requested_model = context.get("provider_model")
+    requested_mode = context.get("provider_mode")
+    if requested_model is not None and not isinstance(requested_model, str):
+        raise RuntimeError("Invalid provider_model in Codex job context")
+    if requested_mode is not None and not isinstance(requested_mode, str):
+        raise RuntimeError("Invalid provider_mode in Codex job context")
 
     update_job(
         state="RUNNING",
@@ -405,7 +496,11 @@ def run_codex_candidate_self_improve_job(
     if not (root / ".git").exists():
         raise RuntimeError("Codex runner requires the isolated candidate repository checkout")
 
-    register_agent("Planner", "COMPLETE", f"manual Codex root={root}; goal={goal[:180]}")
+    register_agent(
+        "Planner",
+        "COMPLETE",
+        f"manual Codex root={root}; model={requested_model or 'default'}; mode={requested_mode or 'default'}; goal={goal[:180]}",
+    )
 
     try:
         applied, codex_summary, usage_data = _run_codex_edit(
@@ -413,6 +508,8 @@ def run_codex_candidate_self_improve_job(
             goal=goal,
             update_job=update_job,
             register_agent=register_agent,
+            requested_model=requested_model,
+            requested_mode=requested_mode,
         )
     except Exception as exc:
         register_agent("Codex", "FAILED", str(exc)[:500])

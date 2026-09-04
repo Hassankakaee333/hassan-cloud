@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { authMiddleware, callbackAuth } from "./auth";
-import { nowMs, sql } from "./db";
+import { newId, nowMs, sql } from "./db";
 import { dispatchGitHubWorkflow } from "./github";
 import { phoneAgentRoutes } from "./phone-agent";
 import type { Env } from "./types";
@@ -10,6 +10,7 @@ export const workspaceRoutes = new Hono<{ Bindings: Env }>();
 const MAX_FILE_BYTES = 512 * 1024;
 const MAX_WORKSPACE_BYTES = 5 * 1024 * 1024;
 const MAX_FILES = 300;
+const MANUAL_CODEX_JOB = "codex_candidate_self_improve";
 
 function normalizePath(raw: string): string | null {
   const path = raw.trim().replace(/\\/g, "/");
@@ -61,6 +62,21 @@ async function projectExists(env: Env, projectId: string): Promise<boolean> {
   return rows.length > 0;
 }
 
+// The general job endpoint is defined by the parent app. Intercept only the
+// manual Codex execution type here so accidental Auto/text routing cannot
+// dispatch it. The dedicated /v1/runtime-jobs path below is the only accepted
+// client route for Codex execution metadata.
+workspaceRoutes.post("/v1/jobs", authMiddleware, async (c, next) => {
+  const body = (await c.req.raw.clone().json()) as { job_type?: string };
+  if (body.job_type === MANUAL_CODEX_JOB) {
+    return c.json(
+      { detail: "manual Codex execution must use /v1/runtime-jobs after explicit selection" },
+      409,
+    );
+  }
+  await next();
+});
+
 workspaceRoutes.post("/v1/runtime-jobs", authMiddleware, async (c) => {
   const body = await c.req.json<{
     project_id: string;
@@ -71,7 +87,7 @@ workspaceRoutes.post("/v1/runtime-jobs", authMiddleware, async (c) => {
     provider_model?: string;
     provider_mode?: string;
   }>();
-  if (body.job_type !== "codex_candidate_self_improve") {
+  if (body.job_type !== MANUAL_CODEX_JOB) {
     return c.json({ detail: "runtime-jobs currently accepts manual Codex execution only" }, 400);
   }
   if (!body.project_id || !body.goal) {
@@ -88,7 +104,7 @@ workspaceRoutes.post("/v1/runtime-jobs", authMiddleware, async (c) => {
     if (existing.length > 0) return c.json(existing[0]);
   }
 
-  const id = crypto.randomUUID().replace(/-/g, "").slice(0, 24);
+  const id = newId();
   const ts = nowMs();
   await db`INSERT INTO jobs (
     id, project_id, conversation_id, goal, job_type, state, result_summary, log,

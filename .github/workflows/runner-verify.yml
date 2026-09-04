@@ -5,6 +5,7 @@ on:
     paths:
       - "scripts/**"
       - "hassan_cloud/**"
+      - "tests/test_codex_account_snapshot.py"
       - ".github/workflows/hassan-job.yml"
       - ".github/workflows/runner-verify.yml"
 
@@ -20,7 +21,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Compile runner Python
-        run: python -m compileall -q scripts hassan_cloud
+        run: python -m compileall -q scripts hassan_cloud tests/test_codex_account_snapshot.py
       - name: Install Codex SDK for API-shape validation only
         run: pip install openai-codex
       - name: Verify Codex SDK surface without login or execution
@@ -48,4 +49,15 @@ jobs:
           assert not _allowed_source_path("app/signing/candidate-ci.keystore")
           assert not _allowed_source_path("secrets.txt")
           print("manual Codex path guard: PASS")
+          PY
+      - name: Verify read-only Codex account snapshot parser
+        run: |
+          python - <<'PY'
+          import runpy
+          tests = runpy.run_path("tests/test_codex_account_snapshot.py")
+          tests["test_parse_app_server_responses_ignores_noise"]()
+          tests["test_account_snapshot_keeps_identity_but_not_tokens"]()
+          tests["test_models_preserve_server_order_and_reasoning_options"]()
+          tests["test_rate_limits_classify_by_duration_not_slot_name"]()
+          print("Codex account snapshot: PASS (no login, no model execution)")
           PY

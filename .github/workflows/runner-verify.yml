@@ -63,7 +63,8 @@ jobs:
         run: |
           python - <<'PY'
           from hassan_cloud.entrypoint import app
-          paths = {route.path for route in app.routes}
+          paths = {getattr(route, "path", None) for route in app.routes}
+          paths.discard(None)
           assert "/v1/agent-verifications" in paths
           assert "/v1/agent-verifications/{job_id}" in paths
           assert "/v1/internal/agent-verifications/{job_id}/evidence" in paths

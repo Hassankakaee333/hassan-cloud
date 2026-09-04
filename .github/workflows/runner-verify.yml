@@ -63,12 +63,11 @@ jobs:
         run: |
           python - <<'PY'
           from hassan_cloud.entrypoint import app
-          paths = {getattr(route, "path", None) for route in app.routes}
-          paths.discard(None)
-          assert "/v1/agent-verifications" in paths
-          assert "/v1/agent-verifications/{job_id}" in paths
-          assert "/v1/internal/agent-verifications/{job_id}/evidence" in paths
-          print("Agent verification entrypoint routes: PASS")
+          paths = set(app.openapi().get("paths", {}).keys())
+          assert "/v1/agent-verifications" in paths, paths
+          assert "/v1/agent-verifications/{job_id}" in paths, paths
+          assert "/v1/internal/agent-verifications/{job_id}/evidence" in paths, paths
+          print("Agent verification entrypoint OpenAPI routes: PASS")
           PY
       - name: Verify cloud runtime guards without invoking providers or Agent code
         run: pytest -q tests/test_codex_persistent_auth.py tests/test_codex_account_snapshot.py tests/test_codex_runtime_selection.py tests/test_agent_artifact_verify_runner.py tests/test_agent_verification_dispatch.py tests/test_agent_verification_api.py

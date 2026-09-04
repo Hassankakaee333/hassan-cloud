@@ -1,0 +1,16 @@
+name: Cancel stuck Hassan job
+
+on:
+  push:
+    branches:
+      - cancel-stuck-33836304019
+
+concurrency:
+  group: hassan-job-3d78bdfe-0d1d-4f79-aaad-d12f37911354
+  cancel-in-progress: true
+
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Cancelling stuck Hassan job by replacing its concurrency slot"

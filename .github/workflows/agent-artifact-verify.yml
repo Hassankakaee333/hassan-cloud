@@ -3,6 +3,10 @@ name: Agent Artifact Verify
 on:
   workflow_dispatch:
     inputs:
+      job_id:
+        description: Hassan Cloud Agent verification job ID
+        required: true
+        type: string
       agent_id:
         description: ACP/A2A agent identifier
         required: true
@@ -40,7 +44,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: frishta-agent-verify-${{ inputs.agent_id }}-${{ inputs.version }}
+  group: frishta-agent-verify-${{ inputs.job_id }}
   cancel-in-progress: false
 
 jobs:
@@ -72,7 +76,7 @@ jobs:
         continue-on-error: true
         run: python scripts/agent_artifact_verify_runner.py
 
-      - name: Assert evidence explicitly records no execution and no user secrets
+      - name: Assert evidence explicitly records no execution and no Hassan secrets
         if: always()
         run: |
           python - <<'PY'
@@ -87,6 +91,8 @@ jobs:
           assert report.get('secrets_used') is False
           assert report.get('agent_id') == '${{ inputs.agent_id }}'
           assert report.get('static_evidence_id') == '${{ inputs.static_evidence_id }}'
+          report['github_run_id'] = '${{ github.run_id }}'
+          path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding='utf-8')
           print('no-exec/no-secret evidence assertions: PASS')
           PY
 
@@ -94,11 +100,70 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: frishta-agent-verification-${{ inputs.agent_id }}-${{ github.run_id }}
+          name: frishta-agent-verification-${{ inputs.job_id }}-${{ github.run_id }}
           path: /tmp/frishta-agent-verify/agent-artifact-verification.json
           if-no-files-found: error
           retention-days: 30
 
-      - name: Fail workflow on verifier blocker
-        if: steps.verify.outcome != 'success'
+      - name: Record verifier outcome
+        if: always()
+        run: echo "verifier_outcome=${{ steps.verify.outcome }}" >> "$GITHUB_OUTPUT"
+        id: outcome
+
+  publish:
+    needs: verify
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Download verification evidence only
+        uses: actions/download-artifact@v4
+        with:
+          name: frishta-agent-verification-${{ inputs.job_id }}-${{ github.run_id }}
+          path: /tmp/frishta-agent-evidence
+
+      - name: Publish evidence back to Hassan Cloud
+        env:
+          HASSAN_API_URL: ${{ secrets.HASSAN_API_URL }}
+          HASSAN_CALLBACK_SECRET: ${{ secrets.HASSAN_CALLBACK_SECRET }}
+          HASSAN_JOB_ID: ${{ inputs.job_id }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          api = os.environ.get('HASSAN_API_URL', '').rstrip('/')
+          secret = os.environ.get('HASSAN_CALLBACK_SECRET', '')
+          job_id = os.environ['HASSAN_JOB_ID']
+          if not api or not secret:
+              raise SystemExit('HASSAN_API_URL and HASSAN_CALLBACK_SECRET are required for evidence callback')
+          path = Path('/tmp/frishta-agent-evidence/agent-artifact-verification.json')
+          data = path.read_bytes()
+          request = urllib.request.Request(
+              f'{api}/v1/internal/agent-verifications/{job_id}/evidence',
+              data=data,
+              headers={
+                  'Content-Type': 'application/json',
+                  'X-Hassan-Callback-Secret': secret,
+                  'User-Agent': 'Frishta-Agent-Evidence-Publisher/1',
+              },
+              method='POST',
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  body = response.read().decode('utf-8')
+                  print(body)
+          except urllib.error.HTTPError as exc:
+              print(exc.read().decode('utf-8', errors='replace'))
+              raise
+          PY
+
+      - name: Fail publish when verifier had blockers
+        if: needs.verify.result != 'success'
         run: exit 1

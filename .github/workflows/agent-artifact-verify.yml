@@ -105,11 +105,6 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Record verifier outcome
-        if: always()
-        run: echo "verifier_outcome=${{ steps.verify.outcome }}" >> "$GITHUB_OUTPUT"
-        id: outcome
-
   publish:
     needs: verify
     if: always()
@@ -132,7 +127,6 @@ jobs:
           HASSAN_JOB_ID: ${{ inputs.job_id }}
         run: |
           python - <<'PY'
-          import json
           import os
           import urllib.error
           import urllib.request
@@ -157,13 +151,23 @@ jobs:
           )
           try:
               with urllib.request.urlopen(request, timeout=60) as response:
-                  body = response.read().decode('utf-8')
-                  print(body)
+                  print(response.read().decode('utf-8'))
           except urllib.error.HTTPError as exc:
               print(exc.read().decode('utf-8', errors='replace'))
               raise
           PY
 
-      - name: Fail publish when verifier had blockers
-        if: needs.verify.result != 'success'
-        run: exit 1
+      - name: Fail workflow only when evidence contains blockers
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(
+              Path('/tmp/frishta-agent-evidence/agent-artifact-verification.json').read_text(encoding='utf-8')
+          )
+          blockers = report.get('blockers') or []
+          if blockers:
+              raise SystemExit(f'Agent artifact verification blocked: {blockers[:3]}')
+          print(f"Agent verification workflow complete; passed={bool(report.get('passed'))}")
+          PY

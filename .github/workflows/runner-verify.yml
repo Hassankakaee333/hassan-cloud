@@ -9,7 +9,9 @@ on:
       - "tests/test_codex_account_snapshot.py"
       - "tests/test_codex_persistent_auth.py"
       - "tests/test_codex_runtime_selection.py"
+      - "tests/test_agent_artifact_verify_runner.py"
       - ".github/workflows/hassan-job.yml"
+      - ".github/workflows/agent-artifact-verify.yml"
       - ".github/workflows/runner-verify.yml"
 
 permissions:
@@ -24,7 +26,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Compile runner Python
-        run: python -m compileall -q scripts hassan_cloud tests/test_codex_account_snapshot.py tests/test_codex_persistent_auth.py tests/test_codex_runtime_selection.py
+        run: python -m compileall -q scripts hassan_cloud tests/test_codex_account_snapshot.py tests/test_codex_persistent_auth.py tests/test_codex_runtime_selection.py tests/test_agent_artifact_verify_runner.py
       - name: Install cloud requirements and Codex SDK for API-shape validation
         run: pip install -r requirements.txt openai-codex
       - name: Verify Codex SDK surface without login or execution
@@ -54,5 +56,5 @@ jobs:
           assert not _allowed_source_path("secrets.txt")
           print("manual Codex path guard: PASS")
           PY
-      - name: Verify encrypted session, account snapshot, and dynamic runtime selection
-        run: pytest -q tests/test_codex_persistent_auth.py tests/test_codex_account_snapshot.py tests/test_codex_runtime_selection.py
+      - name: Verify encrypted session, account snapshot, dynamic runtime selection, and agent artifact guards
+        run: pytest -q tests/test_codex_persistent_auth.py tests/test_codex_account_snapshot.py tests/test_codex_runtime_selection.py tests/test_agent_artifact_verify_runner.py

@@ -1,0 +1,173 @@
+name: Agent Artifact Verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: Hassan Cloud Agent verification job ID
+        required: true
+        type: string
+      agent_id:
+        description: ACP/A2A agent identifier
+        required: true
+        type: string
+      static_evidence_id:
+        description: Static inspection evidence id/hash
+        required: true
+        type: string
+      distribution_kind:
+        description: binary, npx, or uvx
+        required: true
+        type: choice
+        options:
+          - binary
+          - npx
+          - uvx
+      version:
+        description: Exact registry agent version
+        required: true
+        type: string
+      source_url:
+        description: HTTPS binary archive URL (binary only)
+        required: false
+        type: string
+      expected_sha256:
+        description: Registry SHA-256 (binary only)
+        required: false
+        type: string
+      package:
+        description: Exact npm package spec or PyPI package name
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frishta-agent-verify-${{ inputs.job_id }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      FRISHTA_AGENT_ID: ${{ inputs.agent_id }}
+      FRISHTA_STATIC_EVIDENCE_ID: ${{ inputs.static_evidence_id }}
+      FRISHTA_DISTRIBUTION_KIND: ${{ inputs.distribution_kind }}
+      FRISHTA_VERSION: ${{ inputs.version }}
+      FRISHTA_SOURCE_URL: ${{ inputs.source_url }}
+      FRISHTA_EXPECTED_SHA256: ${{ inputs.expected_sha256 }}
+      FRISHTA_PACKAGE: ${{ inputs.package }}
+      FRISHTA_VERIFY_OUT_DIR: /tmp/frishta-agent-verify
+      FRISHTA_MAX_BYTES: "125829120"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install verifier dependency only
+        run: pip install httpx==0.28.1
+
+      - name: Verify artifact without executing Agent code
+        id: verify
+        continue-on-error: true
+        run: python scripts/agent_artifact_verify_runner.py
+
+      - name: Assert evidence explicitly records no execution and no Hassan secrets
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path('/tmp/frishta-agent-verify/agent-artifact-verification.json')
+          if not path.exists():
+              raise SystemExit('verification evidence missing')
+          report = json.loads(path.read_text(encoding='utf-8'))
+          assert report.get('artifact_executed') is False
+          assert report.get('secrets_used') is False
+          assert report.get('agent_id') == '${{ inputs.agent_id }}'
+          assert report.get('static_evidence_id') == '${{ inputs.static_evidence_id }}'
+          report['github_run_id'] = '${{ github.run_id }}'
+          path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding='utf-8')
+          print('no-exec/no-secret evidence assertions: PASS')
+          PY
+
+      - name: Upload verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frishta-agent-verification-${{ inputs.job_id }}-${{ github.run_id }}
+          path: /tmp/frishta-agent-verify/agent-artifact-verification.json
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: verify
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Download verification evidence only
+        uses: actions/download-artifact@v4
+        with:
+          name: frishta-agent-verification-${{ inputs.job_id }}-${{ github.run_id }}
+          path: /tmp/frishta-agent-evidence
+
+      - name: Publish evidence back to Hassan Cloud
+        env:
+          HASSAN_API_URL: ${{ secrets.HASSAN_API_URL }}
+          HASSAN_CALLBACK_SECRET: ${{ secrets.HASSAN_CALLBACK_SECRET }}
+          HASSAN_JOB_ID: ${{ inputs.job_id }}
+        run: |
+          python - <<'PY'
+          import os
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          api = os.environ.get('HASSAN_API_URL', '').rstrip('/')
+          secret = os.environ.get('HASSAN_CALLBACK_SECRET', '')
+          job_id = os.environ['HASSAN_JOB_ID']
+          if not api or not secret:
+              raise SystemExit('HASSAN_API_URL and HASSAN_CALLBACK_SECRET are required for evidence callback')
+          path = Path('/tmp/frishta-agent-evidence/agent-artifact-verification.json')
+          data = path.read_bytes()
+          request = urllib.request.Request(
+              f'{api}/v1/internal/agent-verifications/{job_id}/evidence',
+              data=data,
+              headers={
+                  'Content-Type': 'application/json',
+                  'X-Hassan-Callback-Secret': secret,
+                  'User-Agent': 'Frishta-Agent-Evidence-Publisher/1',
+              },
+              method='POST',
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  print(response.read().decode('utf-8'))
+          except urllib.error.HTTPError as exc:
+              print(exc.read().decode('utf-8', errors='replace'))
+              raise
+          PY
+
+      - name: Fail workflow only when evidence contains blockers
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(
+              Path('/tmp/frishta-agent-evidence/agent-artifact-verification.json').read_text(encoding='utf-8')
+          )
+          blockers = report.get('blockers') or []
+          if blockers:
+              raise SystemExit(f'Agent artifact verification blocked: {blockers[:3]}')
+          print(f"Agent verification workflow complete; passed={bool(report.get('passed'))}")
+          PY

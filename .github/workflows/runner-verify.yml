@@ -1,0 +1,37 @@
+name: Runner Verify
+
+on:
+  pull_request:
+    paths:
+      - "scripts/**"
+      - "hassan_cloud/**"
+      - ".github/workflows/hassan-job.yml"
+      - ".github/workflows/runner-verify.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile runner Python
+        run: python -m compileall -q scripts hassan_cloud
+      - name: Verify manual Codex path guard without invoking Codex
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "scripts")
+          from codex_candidate_self_improve_job import _allowed_source_path
+
+          assert _allowed_source_path("app/src/main/java/ai/hassan/app/ui/HassanApp.kt")
+          assert _allowed_source_path("docs/CODEX.md")
+          assert not _allowed_source_path(".github/workflows/unsafe.yml")
+          assert not _allowed_source_path("app/signing/candidate-ci.keystore")
+          assert not _allowed_source_path("secrets.txt")
+          print("manual Codex path guard: PASS")
+          PY

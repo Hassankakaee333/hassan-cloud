@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -20,6 +21,7 @@ from .agent_verification import AgentVerificationSpec, dispatch_agent_verificati
 REQUEST_ARTIFACT = "agent-verification-request.json"
 EVIDENCE_ARTIFACT = "agent-artifact-verification.json"
 JOB_TYPE = "agent_artifact_verify"
+_SHA256 = re.compile(r"^[a-fA-F0-9]{64}$")
 
 
 class AgentVerificationRequest(BaseModel):
@@ -37,13 +39,13 @@ class AgentVerificationRequest(BaseModel):
 
 class AgentVerificationEvidence(BaseModel):
     schema_version: int = 1
-    agent_id: str
-    evidence_id: str
-    static_evidence_id: str
+    agent_id: str = Field(min_length=1, max_length=128)
+    evidence_id: str = Field(min_length=1, max_length=256)
+    static_evidence_id: str = Field(min_length=1, max_length=256)
     github_run_id: str | int | None = None
-    distribution_kind: str | None = None
-    version: str | None = None
-    artifact_sha256: str = ""
+    distribution_kind: str | None = Field(default=None, max_length=16)
+    version: str | None = Field(default=None, max_length=128)
+    artifact_sha256: str = Field(default="", max_length=64)
     artifact_executed: bool
     secrets_used: bool
     integrity_verified: bool
@@ -52,7 +54,7 @@ class AgentVerificationEvidence(BaseModel):
     passed: bool
     blockers: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    source_url: str | None = None
+    source_url: str | None = Field(default=None, max_length=2048)
     archive: dict[str, Any] | None = None
 
 
@@ -120,6 +122,24 @@ def _callback_authorized(provided: str | None) -> None:
         raise HTTPException(status_code=401, detail="invalid callback secret")
 
 
+def _validate_evidence_consistency(body: AgentVerificationEvidence) -> None:
+    if body.artifact_executed or body.secrets_used:
+        raise HTTPException(status_code=409, detail="unsafe verification evidence rejected")
+    if body.artifact_sha256 and not _SHA256.fullmatch(body.artifact_sha256):
+        raise HTTPException(status_code=409, detail="invalid artifact SHA-256 in evidence")
+    if body.passed:
+        if body.blockers:
+            raise HTTPException(status_code=409, detail="passed evidence cannot contain blockers")
+        if not body.artifact_sha256 or not _SHA256.fullmatch(body.artifact_sha256):
+            raise HTTPException(status_code=409, detail="passed evidence requires artifact SHA-256")
+        if not body.integrity_verified:
+            raise HTTPException(status_code=409, detail="passed evidence requires integrity verification")
+        if not body.archive_safe:
+            raise HTTPException(status_code=409, detail="passed evidence requires safe archive inspection")
+        if not body.dependency_lock_complete:
+            raise HTTPException(status_code=409, detail="passed evidence requires complete dependency lock")
+
+
 def build_agent_verification_router(
     *,
     repo: Any,
@@ -152,6 +172,7 @@ def build_agent_verification_router(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+        canonical = _canonical_request(body)
         job = repo.create_job(
             new_id(),
             body.project_id,
@@ -174,10 +195,17 @@ def build_agent_verification_router(
                 job,
                 REQUEST_ARTIFACT,
                 "application/json",
-                _canonical_request(body),
+                canonical,
             )
-        elif job.get("state") != "QUEUED":
-            return {**job, "dispatch_status": "EXISTING", "request_artifact": existing_request}
+        else:
+            try:
+                existing_bytes = files.read(existing_request["storage_path"])
+            except Exception as exc:
+                raise HTTPException(status_code=409, detail=f"existing request artifact unreadable: {exc}") from exc
+            if not hmac.compare_digest(existing_bytes, canonical):
+                raise HTTPException(status_code=409, detail="idempotency key reused with different verification request")
+            if job.get("state") != "QUEUED":
+                return {**job, "dispatch_status": "EXISTING", "request_artifact": existing_request}
 
         result = dispatch_agent_verification(job["id"], spec)
         if result.status == "QUEUED":
@@ -227,6 +255,8 @@ def build_agent_verification_router(
         job = repo.get_job(job_id)
         if not job or job.get("job_type") != JOB_TYPE:
             raise HTTPException(status_code=404, detail="agent verification not found")
+        if job.get("state") == "CANCELLED":
+            raise HTTPException(status_code=409, detail="cancelled verification cannot accept evidence")
         request_payload = _load_request(repo, files, job)
 
         if body.agent_id != request_payload.get("agent_id"):
@@ -237,8 +267,7 @@ def build_agent_verification_router(
             raise HTTPException(status_code=409, detail="evidence distribution_kind mismatch")
         if body.version and body.version != request_payload.get("version"):
             raise HTTPException(status_code=409, detail="evidence version mismatch")
-        if body.artifact_executed or body.secrets_used:
-            raise HTTPException(status_code=409, detail="unsafe verification evidence rejected")
+        _validate_evidence_consistency(body)
 
         existing = _find_job_artifact(repo, job, EVIDENCE_ARTIFACT)
         evidence_bytes = json.dumps(

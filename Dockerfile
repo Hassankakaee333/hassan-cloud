@@ -16,4 +16,4 @@ COPY hassan_cloud ./hassan_cloud
 
 EXPOSE 8787
 
-CMD ["sh", "-c", "uvicorn hassan_cloud.main:app --host 0.0.0.0 --port ${PORT:-8787}"]
+CMD ["sh", "-c", "uvicorn hassan_cloud.entrypoint:app --host 0.0.0.0 --port ${PORT:-8787}"]

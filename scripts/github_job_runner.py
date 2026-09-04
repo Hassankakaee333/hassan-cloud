@@ -16,6 +16,7 @@ import httpx
 from persistent_workspace_job import run_persistent_workspace_job
 from agentos_android_job import run_agentos_android_job
 from candidate_self_improve_job import run_candidate_self_improve_job
+from codex_candidate_self_improve_job import run_codex_candidate_self_improve_job
 from workspace_io import fetch_job_context
 
 API_URL = os.environ.get("HASSAN_API_URL", "").rstrip("/")
@@ -242,6 +243,8 @@ def finalize_job() -> None:
         summary = "HassanTodoBenchmark AgentOS Android job completed via GitHub Actions"
     elif JOB_TYPE == "candidate_self_improve":
         summary = "Frishta candidate self-improve APK completed via GitHub Actions"
+    elif JOB_TYPE == "codex_candidate_self_improve":
+        summary = "Frishta candidate manual Codex self-improve APK completed via GitHub Actions"
     else:
         summary = "Coding job completed via GitHub Actions"
     update_job(
@@ -297,6 +300,17 @@ def main() -> None:
         )
     elif JOB_TYPE == "candidate_self_improve":
         run_candidate_self_improve_job(
+            job_id=JOB_ID,
+            project_id=PROJECT_ID,
+            github_run_id=GITHUB_RUN_ID,
+            out_dir=OUT_DIR,
+            update_job=update_job,
+            register_agent=register_agent,
+            stage_artifact=stage_artifact,
+            fetch_job_context=fetch_job_context,
+        )
+    elif JOB_TYPE == "codex_candidate_self_improve":
+        run_codex_candidate_self_improve_job(
             job_id=JOB_ID,
             project_id=PROJECT_ID,
             github_run_id=GITHUB_RUN_ID,

@@ -1,0 +1,166 @@
+name: Agent ACP Shadow Session
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        required: true
+        type: string
+      agent_id:
+        required: true
+        type: string
+      static_evidence_id:
+        required: true
+        type: string
+      security_verification_job_id:
+        required: true
+        type: string
+      benchmark_job_id:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      source_url:
+        required: true
+        type: string
+      expected_sha256:
+        required: true
+        type: string
+      command:
+        required: true
+        type: string
+      args_json:
+        required: true
+        type: string
+      protocol_version:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frishta-agent-shadow-${{ inputs.job_id }}
+  cancel-in-progress: false
+
+jobs:
+  shadow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      FRISHTA_JOB_ID: ${{ inputs.job_id }}
+      FRISHTA_AGENT_ID: ${{ inputs.agent_id }}
+      FRISHTA_STATIC_EVIDENCE_ID: ${{ inputs.static_evidence_id }}
+      FRISHTA_SECURITY_VERIFICATION_JOB_ID: ${{ inputs.security_verification_job_id }}
+      FRISHTA_BENCHMARK_JOB_ID: ${{ inputs.benchmark_job_id }}
+      FRISHTA_VERSION: ${{ inputs.version }}
+      FRISHTA_SOURCE_URL: ${{ inputs.source_url }}
+      FRISHTA_EXPECTED_SHA256: ${{ inputs.expected_sha256 }}
+      FRISHTA_COMMAND: ${{ inputs.command }}
+      FRISHTA_ARGS_JSON: ${{ inputs.args_json }}
+      FRISHTA_PROTOCOL_VERSION: ${{ inputs.protocol_version }}
+      FRISHTA_SHADOW_OUT_DIR: /tmp/frishta-agent-shadow
+      FRISHTA_SANDBOX_IMAGE: ubuntu:24.04
+      FRISHTA_SHADOW_TIMEOUT_SECONDS: "15"
+      GITHUB_TOKEN: ""
+      GH_TOKEN: ""
+      HASSAN_CALLBACK_SECRET: ""
+      HASSAN_API_URL: ""
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install shadow dependency only
+        run: pip install httpx==0.28.1
+      - name: Prepare fixed sandbox image before untrusted execution
+        run: docker pull ubuntu:24.04
+      - name: Run initialize plus empty session/new inside isolated container
+        continue-on-error: true
+        run: python scripts/agent_acp_shadow_runner.py
+      - name: Assert shadow evidence never used auth prompts permissions tools or secrets
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path('/tmp/frishta-agent-shadow/agent-acp-shadow.json')
+          if not path.exists():
+              raise SystemExit('shadow evidence missing')
+          report = json.loads(path.read_text(encoding='utf-8'))
+          assert report.get('agent_id') == os.environ['FRISHTA_AGENT_ID']
+          assert report.get('static_evidence_id') == os.environ['FRISHTA_STATIC_EVIDENCE_ID']
+          assert report.get('security_verification_job_id') == os.environ['FRISHTA_SECURITY_VERIFICATION_JOB_ID']
+          assert report.get('benchmark_job_id') == os.environ['FRISHTA_BENCHMARK_JOB_ID']
+          assert report.get('secrets_used') is False
+          assert report.get('auth_attempted') is False
+          assert report.get('prompt_sent') is False
+          assert report.get('permission_requests') == 0
+          assert report.get('tool_requests') == 0
+          report['github_run_id'] = os.environ.get('GITHUB_RUN_ID', '')
+          path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding='utf-8')
+          print('no-auth/no-prompt/no-permission/no-tool shadow evidence: PASS')
+          PY
+      - name: Upload shadow evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frishta-agent-shadow-${{ inputs.job_id }}-${{ github.run_id }}
+          path: /tmp/frishta-agent-shadow/agent-acp-shadow.json
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: shadow
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: frishta-agent-shadow-${{ inputs.job_id }}-${{ github.run_id }}
+          path: /tmp/frishta-agent-shadow-evidence
+      - name: Publish evidence back to Hassan Cloud after untrusted process is gone
+        env:
+          HASSAN_API_URL: ${{ secrets.HASSAN_API_URL }}
+          HASSAN_CALLBACK_SECRET: ${{ secrets.HASSAN_CALLBACK_SECRET }}
+          HASSAN_JOB_ID: ${{ inputs.job_id }}
+        run: |
+          python - <<'PY'
+          import os, urllib.error, urllib.request
+          from pathlib import Path
+          api = os.environ.get('HASSAN_API_URL', '').rstrip('/')
+          secret = os.environ.get('HASSAN_CALLBACK_SECRET', '')
+          job_id = os.environ['HASSAN_JOB_ID']
+          if not api or not secret:
+              raise SystemExit('HASSAN_API_URL and HASSAN_CALLBACK_SECRET are required')
+          path = Path('/tmp/frishta-agent-shadow-evidence/agent-acp-shadow.json')
+          req = urllib.request.Request(
+              f'{api}/v1/internal/agent-shadows/{job_id}/evidence',
+              data=path.read_bytes(),
+              headers={'Content-Type':'application/json','X-Hassan-Callback-Secret':secret,'User-Agent':'Frishta-Agent-Shadow-Publisher/1'},
+              method='POST',
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=60) as response:
+                  print(response.read().decode('utf-8'))
+          except urllib.error.HTTPError as exc:
+              print(exc.read().decode('utf-8', errors='replace'))
+              raise
+          PY
+      - name: Fail workflow when shadow session did not pass
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('/tmp/frishta-agent-shadow-evidence/agent-acp-shadow.json').read_text(encoding='utf-8'))
+          if not report.get('passed'):
+              raise SystemExit(f"Agent shadow failed: {(report.get('blockers') or [])[:3]}")
+          print('Agent ACP shadow session passed')
+          PY

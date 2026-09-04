@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       job_type:
-        description: Job type (coding, general, android_build, workspace_coding, agentos_android, candidate_self_improve)
+        description: Job type (coding, general, android_build, workspace_coding, agentos_android, candidate_self_improve, codex_candidate_self_improve)
         required: true
         type: string
 
@@ -36,47 +36,50 @@ jobs:
           python-version: "3.12"
 
       - name: Set up Java for Android builds
-        if: inputs.job_type == 'android_build' || inputs.job_type == 'agentos_android' || inputs.job_type == 'candidate_self_improve'
+        if: inputs.job_type == 'android_build' || inputs.job_type == 'agentos_android' || inputs.job_type == 'candidate_self_improve' || inputs.job_type == 'codex_candidate_self_improve'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Set up Android SDK
-        if: inputs.job_type == 'android_build' || inputs.job_type == 'agentos_android' || inputs.job_type == 'candidate_self_improve'
+        if: inputs.job_type == 'android_build' || inputs.job_type == 'agentos_android' || inputs.job_type == 'candidate_self_improve' || inputs.job_type == 'codex_candidate_self_improve'
         uses: android-actions/setup-android@v3
 
       - name: Accept Android SDK licenses
-        if: inputs.job_type == 'android_build' || inputs.job_type == 'agentos_android' || inputs.job_type == 'candidate_self_improve'
+        if: inputs.job_type == 'android_build' || inputs.job_type == 'agentos_android' || inputs.job_type == 'candidate_self_improve' || inputs.job_type == 'codex_candidate_self_improve'
         run: yes | sdkmanager --licenses >/tmp/sdk-licenses.txt || true
 
       - name: Install Android SDK packages
-        if: inputs.job_type == 'agentos_android' || inputs.job_type == 'candidate_self_improve'
+        if: inputs.job_type == 'agentos_android' || inputs.job_type == 'candidate_self_improve' || inputs.job_type == 'codex_candidate_self_improve'
         run: |
           sdkmanager "platforms;android-35" "platforms;android-36" "build-tools;35.0.0" "platform-tools"
 
       - name: Set up Gradle
-        if: inputs.job_type == 'android_build' || inputs.job_type == 'agentos_android' || inputs.job_type == 'candidate_self_improve'
+        if: inputs.job_type == 'android_build' || inputs.job_type == 'agentos_android' || inputs.job_type == 'candidate_self_improve' || inputs.job_type == 'codex_candidate_self_improve'
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
       - name: Checkout candidate Android app (optional)
-        if: inputs.job_type == 'candidate_self_improve' && vars.HASSAN_CANDIDATE_REPO != ''
+        if: (inputs.job_type == 'candidate_self_improve' || inputs.job_type == 'codex_candidate_self_improve') && vars.HASSAN_CANDIDATE_REPO != ''
         uses: actions/checkout@v4
         with:
           repository: ${{ vars.HASSAN_CANDIDATE_REPO }}
           path: candidate-app
-          # Prefer PAT so later source-push can write to FrishtaAI-candidate (cross-repo).
           token: ${{ secrets.HASSAN_CANDIDATE_TOKEN || secrets.GITHUB_TOKEN }}
           persist-credentials: true
 
       - name: Export CANDIDATE_APP_ROOT when checked out
-        if: inputs.job_type == 'candidate_self_improve' && vars.HASSAN_CANDIDATE_REPO != ''
+        if: (inputs.job_type == 'candidate_self_improve' || inputs.job_type == 'codex_candidate_self_improve') && vars.HASSAN_CANDIDATE_REPO != ''
         run: echo "CANDIDATE_APP_ROOT=${GITHUB_WORKSPACE}/candidate-app" >> "$GITHUB_ENV"
 
       - name: Install runner dependencies
         run: pip install -r requirements.txt
+
+      - name: Install Codex SDK only for an explicitly selected Codex job
+        if: inputs.job_type == 'codex_candidate_self_improve'
+        run: pip install openai-codex
 
       - name: Run Hassan job
         env:

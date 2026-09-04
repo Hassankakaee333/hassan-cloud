@@ -363,100 +363,100 @@ def _base_report() -> dict:
 
 def run() -> tuple[dict, int]:
     report = _base_report()
-    agent_id = _env("FRISHTA_AGENT_ID")
-    static_evidence_id = _env("FRISHTA_STATIC_EVIDENCE_ID")
-    security_job_id = _env("FRISHTA_SECURITY_VERIFICATION_JOB_ID")
-    version = _env("FRISHTA_VERSION")
-    source_url = _env("FRISHTA_SOURCE_URL")
-    expected_sha = _env("FRISHTA_EXPECTED_SHA256").lower()
-    command = _safe_command(_env("FRISHTA_COMMAND"))
-    args = _args()
-    protocol_version = int(_env("FRISHTA_PROTOCOL_VERSION"))
-    job_id = _env("FRISHTA_JOB_ID")
-    if len(expected_sha) != 64 or any(ch not in "0123456789abcdef" for ch in expected_sha):
-        raise ValueError("invalid expected SHA-256")
-    if protocol_version < 1 or protocol_version > 65535:
-        raise ValueError("invalid ACP protocol version")
+    try:
+        agent_id = _env("FRISHTA_AGENT_ID")
+        static_evidence_id = _env("FRISHTA_STATIC_EVIDENCE_ID")
+        security_job_id = _env("FRISHTA_SECURITY_VERIFICATION_JOB_ID")
+        version = _env("FRISHTA_VERSION")
+        source_url = _env("FRISHTA_SOURCE_URL")
+        expected_sha = _env("FRISHTA_EXPECTED_SHA256").lower()
+        command = _safe_command(_env("FRISHTA_COMMAND"))
+        args = _args()
+        protocol_version = int(_env("FRISHTA_PROTOCOL_VERSION"))
+        job_id = _env("FRISHTA_JOB_ID")
+        if len(expected_sha) != 64 or any(ch not in "0123456789abcdef" for ch in expected_sha):
+            raise ValueError("invalid expected SHA-256")
+        if protocol_version < 1 or protocol_version > 65535:
+            raise ValueError("invalid ACP protocol version")
 
-    report.update(
-        agent_id=agent_id,
-        static_evidence_id=static_evidence_id,
-        security_verification_job_id=security_job_id,
-        version=version,
-    )
-
-    with tempfile.TemporaryDirectory(prefix="frishta-acp-benchmark-") as tmp:
-        temp_dir = Path(tmp)
-        artifact = temp_dir / "artifact.bin"
-        with httpx.Client(timeout=httpx.Timeout(60.0, read=180.0), trust_env=False) as client:
-            actual_sha = download_public_https(source_url, artifact, MAX_DOWNLOAD_BYTES, client)
-        report["artifact_sha256"] = actual_sha
-        if actual_sha != expected_sha:
-            report["blockers"].append("sha256_mismatch")
-            return report, 2
-
-        # Repeat the non-exec archive inspection before the execution-specific strict extraction.
-        archive_summary = inspect_archive(artifact)
-        if not archive_summary.get("safe"):
-            report["blockers"].append("archive_not_safe")
-            return report, 2
-
-        execution_root = temp_dir / "root"
-        extraction = safe_extract_for_execution(artifact, execution_root, command)
-        report["archive"] = extraction
-        report["archive_safe"] = True
-        stderr_path = temp_dir / "agent.stderr"
-
-        # From this point the exact verified artifact is intentionally executed, but only inside the
-        # no-network/read-only/resource-limited container. No Hassan secret is present in this job.
-        report["artifact_executed"] = True
-        raw, handshake_ms, return_code = run_initialize_in_sandbox(
-            root=execution_root,
-            command=command,
-            args=args,
-            protocol_version=protocol_version,
-            job_id=job_id,
-            stderr_path=stderr_path,
+        report.update(
+            agent_id=agent_id,
+            static_evidence_id=static_evidence_id,
+            security_verification_job_id=security_job_id,
+            version=version,
         )
-        report["handshake_ms"] = handshake_ms
-        report["process_return_code_after_termination"] = return_code
-        metadata = validate_initialize_response(raw, protocol_version, version)
-        report.update(metadata)
-        report["initialize_response_json"] = raw
-        report["stdout_valid"] = True
 
-        if stderr_path.exists():
-            stderr_data = stderr_path.read_bytes()[:MAX_STDERR_BYTES]
-            report["stderr_bytes"] = stderr_path.stat().st_size
-            report["stderr_sha256"] = hashlib.sha256(stderr_data).hexdigest()
-            if stderr_path.stat().st_size > MAX_STDERR_BYTES:
-                report["warnings"].append("stderr_truncated_for_hash")
+        with tempfile.TemporaryDirectory(prefix="frishta-acp-benchmark-") as tmp:
+            temp_dir = Path(tmp)
+            artifact = temp_dir / "artifact.bin"
+            with httpx.Client(timeout=httpx.Timeout(60.0, read=180.0), trust_env=False) as client:
+                actual_sha = download_public_https(source_url, artifact, MAX_DOWNLOAD_BYTES, client)
+            report["artifact_sha256"] = actual_sha
+            if actual_sha != expected_sha:
+                report["blockers"].append("sha256_mismatch")
+                return report, 2
 
-    report["passed"] = (
-        report["artifact_executed"]
-        and not report["secrets_used"]
-        and report["network_isolated"]
-        and report["filesystem_read_only"]
-        and report["containerized"]
-        and report["timeout_enforced"]
-        and report["archive_safe"]
-        and report["stdout_valid"]
-        and not report["blockers"]
-    )
-    return report, 0 if report["passed"] else 2
+            # Repeat the no-exec archive inspection before the execution-specific strict extraction.
+            archive_summary = inspect_archive(artifact)
+            if not archive_summary.get("safe"):
+                report["blockers"].append("archive_not_safe")
+                return report, 2
+
+            execution_root = temp_dir / "root"
+            extraction = safe_extract_for_execution(artifact, execution_root, command)
+            report["archive"] = extraction
+            report["archive_safe"] = True
+            stderr_path = temp_dir / "agent.stderr"
+
+            # From this point execution is intentionally attempted. Mark it before launching so any
+            # post-launch/launch-boundary failure can never be misreported as a no-exec observation.
+            report["artifact_executed"] = True
+            try:
+                raw, handshake_ms, return_code = run_initialize_in_sandbox(
+                    root=execution_root,
+                    command=command,
+                    args=args,
+                    protocol_version=protocol_version,
+                    job_id=job_id,
+                    stderr_path=stderr_path,
+                )
+                report["handshake_ms"] = handshake_ms
+                report["process_return_code_after_termination"] = return_code
+                metadata = validate_initialize_response(raw, protocol_version, version)
+                report.update(metadata)
+                report["initialize_response_json"] = raw
+                report["stdout_valid"] = True
+            finally:
+                if stderr_path.exists():
+                    stderr_data = stderr_path.read_bytes()[:MAX_STDERR_BYTES]
+                    report["stderr_bytes"] = stderr_path.stat().st_size
+                    report["stderr_sha256"] = hashlib.sha256(stderr_data).hexdigest()
+                    if stderr_path.stat().st_size > MAX_STDERR_BYTES:
+                        report["warnings"].append("stderr_truncated_for_hash")
+
+        report["passed"] = (
+            report["artifact_executed"]
+            and not report["secrets_used"]
+            and report["network_isolated"]
+            and report["filesystem_read_only"]
+            and report["containerized"]
+            and report["timeout_enforced"]
+            and report["archive_safe"]
+            and report["stdout_valid"]
+            and not report["blockers"]
+        )
+        return report, 0 if report["passed"] else 2
+    except Exception as exc:
+        report["passed"] = False
+        report["blockers"].append(f"benchmark_error:{type(exc).__name__}:{exc}")
+        return report, 2
 
 
 def main() -> int:
     out_dir = Path(os.environ.get("FRISHTA_BENCHMARK_OUT_DIR", "/tmp/frishta-agent-benchmark"))
     out_dir.mkdir(parents=True, exist_ok=True)
     report_path = out_dir / "agent-acp-benchmark.json"
-    try:
-        report, exit_code = run()
-    except Exception as exc:
-        report = _base_report()
-        report["artifact_executed"] = bool(report.get("artifact_executed"))
-        report["blockers"] = [f"benchmark_error:{type(exc).__name__}:{exc}"]
-        exit_code = 2
+    report, exit_code = run()
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     print(json.dumps(report, sort_keys=True))
     return exit_code

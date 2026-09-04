@@ -1,0 +1,42 @@
+name: Persistent Codex Auth Patch
+
+on:
+  push:
+    branches:
+      - persistent-codex-auth-20260904
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: persistent-codex-auth-20260904
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Apply persistent Codex auth patch
+        run: python scripts/apply_persistent_codex_auth_patch.py
+      - name: Verify Python syntax and encrypted session tests
+        run: |
+          python -m compileall -q scripts tests
+          pytest -q tests/test_codex_persistent_auth.py tests/test_codex_quota.py
+      - name: Verify no plaintext auth persistence patterns
+        run: |
+          ! grep -R "auth.json" .github/workflows/hassan-job.yml
+          grep -q "actions/cache@v4" .github/workflows/hassan-job.yml
+          grep -q "auth_persisted_encrypted" scripts/codex_candidate_self_improve_job.py
+          grep -q "save_encrypted_codex_home" scripts/codex_candidate_self_improve_job.py
+      - name: Commit real patch and remove one-shot helpers
+        run: |
+          git config user.name "Hassan AI CI"
+          git config user.email "actions@users.noreply.github.com"
+          git rm scripts/apply_persistent_codex_auth_patch.py .github/workflows/persistent-codex-auth-patch.yml
+          git add scripts/codex_candidate_self_improve_job.py scripts/codex_persistent_auth.py tests/test_codex_persistent_auth.py requirements.txt .github/workflows/hassan-job.yml
+          git commit -m "feat: persist encrypted Codex login across manual jobs"
+          git push origin HEAD:persistent-codex-auth-20260904

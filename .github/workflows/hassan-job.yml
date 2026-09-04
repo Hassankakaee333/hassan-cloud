@@ -74,6 +74,15 @@ jobs:
         if: (inputs.job_type == 'candidate_self_improve' || inputs.job_type == 'codex_candidate_self_improve') && vars.HASSAN_CANDIDATE_REPO != ''
         run: echo "CANDIDATE_APP_ROOT=${GITHUB_WORKSPACE}/candidate-app" >> "$GITHUB_ENV"
 
+      - name: Restore encrypted Codex session cache
+        if: inputs.job_type == 'codex_candidate_self_improve'
+        uses: actions/cache@v4
+        with:
+          path: /tmp/hassan-codex-session
+          key: codex-auth-v1-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            codex-auth-v1-${{ runner.os }}-
+
       - name: Install runner dependencies
         run: pip install -r requirements.txt
 
@@ -95,6 +104,7 @@ jobs:
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           HASSAN_CANDIDATE_TOKEN: ${{ secrets.HASSAN_CANDIDATE_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CODEX_SESSION_CACHE: /tmp/hassan-codex-session/codex-session.enc
         run: python scripts/github_job_runner.py
 
       - name: Upload workspace artifact (backup)

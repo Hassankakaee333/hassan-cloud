@@ -87,7 +87,7 @@ def test_failure_after_execution_boundary_keeps_artifact_executed_true(
         "FRISHTA_SOURCE_URL": "https://example.com/agent.bin",
         "FRISHTA_EXPECTED_SHA256": expected_sha,
         "FRISHTA_COMMAND": "bin/agent",
-        "FRISHTA_ARGS_JSON": "[]",
+        "FRISHTA_ARGS_JSON": '["serve", "--stdio"]',
         "FRISHTA_PROTOCOL_VERSION": "1",
         "FRISHTA_JOB_ID": "bench-1",
     }
@@ -115,4 +115,7 @@ def test_failure_after_execution_boundary_keeps_artifact_executed_true(
     assert exit_code == 2
     assert report["artifact_executed"] is True
     assert report["passed"] is False
+    assert report["source_url"] == "https://example.com/agent.bin"
+    assert report["command"] == "bin/agent"
+    assert report["args"] == ["serve", "--stdio"]
     assert any("handshake failed after launch boundary" in item for item in report["blockers"])

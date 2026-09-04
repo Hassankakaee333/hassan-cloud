@@ -339,7 +339,10 @@ def _base_report() -> dict:
         "static_evidence_id": os.environ.get("FRISHTA_STATIC_EVIDENCE_ID", ""),
         "security_verification_job_id": os.environ.get("FRISHTA_SECURITY_VERIFICATION_JOB_ID", ""),
         "version": os.environ.get("FRISHTA_VERSION", ""),
+        "source_url": "",
         "artifact_sha256": "",
+        "command": "",
+        "args": [],
         "artifact_executed": False,
         "secrets_used": False,
         "network_isolated": True,
@@ -384,6 +387,9 @@ def run() -> tuple[dict, int]:
             static_evidence_id=static_evidence_id,
             security_verification_job_id=security_job_id,
             version=version,
+            source_url=source_url,
+            command=command,
+            args=args,
         )
 
         with tempfile.TemporaryDirectory(prefix="frishta-acp-benchmark-") as tmp:

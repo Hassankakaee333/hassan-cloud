@@ -86,9 +86,12 @@ jobs:
       - name: Install runner dependencies
         run: pip install -r requirements.txt
 
-      - name: Install Codex SDK only for an explicitly selected Codex job
+      - name: Install Codex SDK and CLI only for an explicitly selected Codex job
         if: inputs.job_type == 'codex_candidate_self_improve'
-        run: pip install openai-codex
+        run: |
+          pip install openai-codex
+          npm install -g @openai/codex
+          codex --version
 
       - name: Run Hassan job
         env:

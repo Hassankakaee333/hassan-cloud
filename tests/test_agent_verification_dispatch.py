@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 
 import httpx
 import pytest
 
-from hassan_cloud.agent_verification import AgentVerificationSpec, dispatch_agent_verification
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from hassan_cloud.agent_verification import AgentVerificationSpec, dispatch_agent_verification  # noqa: E402
 
 
 def test_binary_spec_requires_https_and_sha() -> None:

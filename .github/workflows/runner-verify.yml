@@ -8,6 +8,7 @@ on:
       - "requirements.txt"
       - "tests/test_codex_account_snapshot.py"
       - "tests/test_codex_persistent_auth.py"
+      - "tests/test_codex_runtime_selection.py"
       - ".github/workflows/hassan-job.yml"
       - ".github/workflows/runner-verify.yml"
 
@@ -23,7 +24,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Compile runner Python
-        run: python -m compileall -q scripts hassan_cloud tests/test_codex_account_snapshot.py tests/test_codex_persistent_auth.py
+        run: python -m compileall -q scripts hassan_cloud tests/test_codex_account_snapshot.py tests/test_codex_persistent_auth.py tests/test_codex_runtime_selection.py
       - name: Install cloud requirements and Codex SDK for API-shape validation
         run: pip install -r requirements.txt openai-codex
       - name: Verify Codex SDK surface without login or execution
@@ -33,6 +34,7 @@ jobs:
 
           assert hasattr(Codex, "login_chatgpt_device_code")
           assert hasattr(Codex, "thread_start")
+          assert hasattr(Codex, "models")
           assert hasattr(Codex, "logout")
           CodexConfig(cwd=".", env={"CODEX_HOME": "/tmp/codex-sdk-shape-check"})
           assert Sandbox.workspace_write is not None
@@ -52,5 +54,5 @@ jobs:
           assert not _allowed_source_path("secrets.txt")
           print("manual Codex path guard: PASS")
           PY
-      - name: Verify encrypted session and read-only account snapshot
-        run: pytest -q tests/test_codex_persistent_auth.py tests/test_codex_account_snapshot.py
+      - name: Verify encrypted session, account snapshot, and dynamic runtime selection
+        run: pytest -q tests/test_codex_persistent_auth.py tests/test_codex_account_snapshot.py tests/test_codex_runtime_selection.py

@@ -1,6 +1,8 @@
 from pathlib import Path
+import sys
 
-from scripts.codex_persistent_auth import restore_encrypted_codex_home, save_encrypted_codex_home
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from codex_persistent_auth import restore_encrypted_codex_home, save_encrypted_codex_home
 
 
 def test_codex_home_round_trip_is_encrypted(tmp_path: Path):

@@ -19,12 +19,7 @@ def _bounds(line: str) -> tuple[int, int, int, int] | None:
 
 
 def _live_put_phone_file(path: str, value: dict, message: str) -> None:
-    """Retry only transient phone-control branch-head conflicts.
-
-    Phone Agent publishes status/outbox commits on the same branch. GitHub Contents API can reject
-    a concurrent create with 409 when that branch head moves between resolution and commit. Retrying
-    the same exact new inbox path is safe and does not broaden the worker's authority.
-    """
+    """Retry only transient phone-control branch-head conflicts."""
     last: Exception | None = None
     for attempt in range(8):
         try:
@@ -50,13 +45,20 @@ def _live_phone_command(
     return _ORIGINAL_PHONE_COMMAND(self, action, args, timeout=max(float(timeout), 90.0))
 
 
-def _live_send_center(tree: str) -> tuple[int, int] | None:
-    """Prefer semantic send labels; fall back only to a tiny adjacent composer control.
+def _editable_target(tree: str) -> str | None:
+    """Return the exact non-password editable node id from the verified Gemini tree."""
+    for line in tree.splitlines():
+        low = line.lower()
+        if "editable=true" not in low or "password=true" in low:
+            continue
+        match = re.search(r"\|id=([^|]+)\|", line)
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+    return None
 
-    Current Gemini Android builds sometimes expose the send icon without an accessibility label.
-    The fallback is intentionally constrained to a small control in the same vertical band as the
-    non-password editable composer, so the smoke never taps arbitrary page/system controls.
-    """
+
+def _live_send_center(tree: str) -> tuple[int, int] | None:
+    """Prefer semantic send labels; fall back only to a tiny adjacent composer control."""
     semantic = _ORIGINAL_SEND_CENTER(tree)
     if semantic:
         return semantic
@@ -106,12 +108,49 @@ def _live_send_center(tree: str) -> tuple[int, int] | None:
     return cx, cy
 
 
+def _live_send(self: GeminiTransport, text: str) -> None:
+    """Set text directly on Gemini's verified editable node; avoid a stale coordinate tap.
+
+    The old transport read Gemini's tree, waited through the GitHub bridge, then tapped old
+    coordinates. A real run proved that the phone could move to Recents before the TAP executed.
+    ACTION_SET_TEXT can target Gemini's exact editable node directly, eliminating that race and one
+    full phone-control round trip. If foreground drift still happens, re-open Gemini once and retry.
+    """
+    if not text or len(text) > worker_module.MAX_TEXT:
+        raise ValueError("Gemini message exceeds worker limit")
+    last_message = ""
+    for _ in range(2):
+        tree = self._tree(reopen=True)
+        target = _editable_target(tree)
+        if not target:
+            raise RuntimeError("Gemini safe editable field not found")
+        result = self.phone.command("SET_TEXT", {"targetText": target, "text": text})
+        if result.get("status") == "COMPLETED" and result.get("activePackage") in worker_module.GEMINI_FOREGROUND_PACKAGES:
+            tree = self._tree()
+            send = _live_send_center(tree)
+            if send:
+                tapped = self.phone.command("TAP", {"x": send[0], "y": send[1]})
+                if tapped.get("status") == "COMPLETED" and tapped.get("activePackage") in worker_module.GEMINI_FOREGROUND_PACKAGES:
+                    return
+                last_message = f"Gemini send tap lost foreground: {tapped.get('activePackage')}"
+                continue
+            for label in ("إرسال", "Send"):
+                try:
+                    clicked = self.phone.command("CLICK_TEXT", {"targetText": label}, timeout=15.0)
+                    if clicked.get("status") == "COMPLETED" and clicked.get("activePackage") in worker_module.GEMINI_FOREGROUND_PACKAGES:
+                        return
+                except Exception:
+                    pass
+            raise RuntimeError("Gemini send control not found")
+        last_message = f"Gemini SET_TEXT failed: {result.get('message')} active={result.get('activePackage')}"
+    raise RuntimeError(last_message or "Gemini text entry failed")
+
+
 def main() -> None:
-    # Patch only this live smoke transport. Production remains fail-closed; after the proof these
-    # bounded transport hardenings are promoted into the worker with the same contract tests.
     worker_module._put_phone_file = _live_put_phone_file
     worker_module._send_center = _live_send_center
     PhoneBridge.command = _live_phone_command
+    GeminiTransport.send = _live_send
     phone = PhoneBridge()
     transport = GeminiTransport(phone)
     prompt = (

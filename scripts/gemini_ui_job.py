@@ -28,6 +28,7 @@ API_URL = os.environ.get("HASSAN_API_URL", "").rstrip("/")
 CALLBACK_SECRET = os.environ.get("HASSAN_CALLBACK_SECRET", "")
 GEMINI_LAUNCH_PACKAGE = "com.google.android.apps.bard"
 GEMINI_FOREGROUND_PACKAGES = {"com.google.android.apps.bard", "com.google.android.googlequicksearchbox"}
+GEMINI_EDITABLE_ID = "com.google.android.googlequicksearchbox:id/assistant_robin_input_collapsed_text_half_sheet"
 STABLE_REFS = {"main", "master", "stable", "refs/heads/main", "refs/heads/master", "refs/heads/stable"}
 MAX_TEXT = 12000
 MAX_GITHUB_FILE = 128 * 1024
@@ -89,7 +90,7 @@ def _read_phone_json(path: str) -> dict[str, Any] | None:
 
 
 class PhoneBridge:
-    def command(self, action: str, args: dict[str, Any] | None = None, *, timeout: float = 45.0) -> dict[str, Any]:
+    def command(self, action: str, args: dict[str, Any] | None = None, *, timeout: float = 90.0) -> dict[str, Any]:
         upper = action.strip().upper()
         if upper in FORBIDDEN_PHONE_ACTIONS or upper not in PHONE_ACTIONS:
             raise ValueError("phone action is not allowed")
@@ -157,14 +158,14 @@ def _extract_protocol(ui_tree: str) -> tuple[str, str] | None:
     return kind, payload[:MAX_TEXT]
 
 
-def _editable_center(tree: str) -> tuple[int, int] | None:
+def _editable_target(tree: str) -> str | None:
     for line in tree.splitlines():
-        if "editable=true" not in line.lower() or "password=true" in line.lower():
+        low = line.lower()
+        if f"id={GEMINI_EDITABLE_ID}" not in line:
             continue
-        match = re.search(r"bounds=(\d+) (\d+) (\d+) (\d+)", line)
-        if match:
-            x1, y1, x2, y2 = map(int, match.groups())
-            return ((x1 + x2) // 2, (y1 + y2) // 2)
+        if "editable=true" not in low or "password=true" in low:
+            continue
+        return GEMINI_EDITABLE_ID
     return None
 
 
@@ -185,9 +186,19 @@ class GeminiTransport:
     def __init__(self, phone: PhoneBridge) -> None:
         self.phone = phone
 
+    def _ensure_gemini(self) -> None:
+        last_active = ""
+        for _ in range(3):
+            opened = self.phone.command("OPEN_APP", {"packageName": GEMINI_LAUNCH_PACKAGE})
+            last_active = str(opened.get("activePackage") or "")
+            if opened.get("status") == "COMPLETED" and last_active in GEMINI_FOREGROUND_PACKAGES:
+                return
+            time.sleep(1.0)
+        raise RuntimeError(f"Gemini could not be reasserted; active={last_active}")
+
     def _tree(self, *, reopen: bool = False) -> str:
         if reopen:
-            self.phone.command("OPEN_APP", {"packageName": GEMINI_LAUNCH_PACKAGE})
+            self._ensure_gemini()
             time.sleep(1.5)
         last_active = ""
         for _ in range(5):
@@ -197,12 +208,12 @@ class GeminiTransport:
                 return str(data.get("uiTree") or "")
             if last_active.startswith("com.android.stk"):
                 # Carrier popups are not interacted with automatically. Re-open Gemini and retry.
-                self.phone.command("OPEN_APP", {"packageName": GEMINI_LAUNCH_PACKAGE})
+                self._ensure_gemini()
                 time.sleep(1.5)
                 continue
             if last_active == "com.android.systemui":
                 raise RuntimeError("phone is locked; unlock the phone and resume the Gemini job")
-            self.phone.command("OPEN_APP", {"packageName": GEMINI_LAUNCH_PACKAGE})
+            self._ensure_gemini()
             time.sleep(1.5)
         raise RuntimeError(f"Gemini is not foreground; active={last_active}")
 
@@ -210,22 +221,26 @@ class GeminiTransport:
         if not text or len(text) > MAX_TEXT:
             raise ValueError("Gemini message exceeds worker limit")
         tree = self._tree(reopen=True)
-        editable = _editable_center(tree)
-        if not editable:
+        target = _editable_target(tree)
+        if not target:
             raise RuntimeError("Gemini safe editable field not found")
-        self.phone.command("TAP", {"x": editable[0], "y": editable[1]})
-        result = self.phone.command("SET_TEXT", {"targetText": "", "text": text})
-        if result.get("status") != "COMPLETED":
-            raise RuntimeError(f"Gemini SET_TEXT failed: {result.get('message')}")
+        self._ensure_gemini()
+        result = self.phone.command("SET_TEXT", {"targetText": target, "text": text})
+        active = str(result.get("activePackage") or "")
+        if result.get("status") != "COMPLETED" or active not in GEMINI_FOREGROUND_PACKAGES:
+            raise RuntimeError(f"Gemini SET_TEXT failed: {result.get('message')}; active={active}")
         tree = self._tree()
         send = _send_center(tree)
         if send:
-            self.phone.command("TAP", {"x": send[0], "y": send[1]})
-            return
+            self._ensure_gemini()
+            clicked = self.phone.command("TAP", {"x": send[0], "y": send[1]})
+            if clicked.get("status") == "COMPLETED" and str(clicked.get("activePackage") or "") in GEMINI_FOREGROUND_PACKAGES:
+                return
         for label in ("إرسال", "Send"):
             try:
-                clicked = self.phone.command("CLICK_TEXT", {"targetText": label}, timeout=15.0)
-                if clicked.get("status") == "COMPLETED":
+                self._ensure_gemini()
+                clicked = self.phone.command("CLICK_TEXT", {"targetText": label}, timeout=90.0)
+                if clicked.get("status") == "COMPLETED" and str(clicked.get("activePackage") or "") in GEMINI_FOREGROUND_PACKAGES:
                     return
             except Exception:
                 pass

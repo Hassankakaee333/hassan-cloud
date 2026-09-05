@@ -1,0 +1,187 @@
+name: Agent ACP One-Time Task
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frishta-agent-task-${{ inputs.job_id }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch approved private task bundle from Hassan Cloud
+        env:
+          HASSAN_API_URL: ${{ secrets.HASSAN_API_URL }}
+          HASSAN_CALLBACK_SECRET: ${{ secrets.HASSAN_CALLBACK_SECRET }}
+          HASSAN_JOB_ID: ${{ inputs.job_id }}
+        run: |
+          python - <<'PY'
+          import os, urllib.error, urllib.request
+          from pathlib import Path
+          api = os.environ.get('HASSAN_API_URL', '').rstrip('/')
+          secret = os.environ.get('HASSAN_CALLBACK_SECRET', '')
+          job_id = os.environ['HASSAN_JOB_ID']
+          if not api or not secret:
+              raise SystemExit('HASSAN_API_URL and HASSAN_CALLBACK_SECRET are required')
+          out = Path('/tmp/frishta-agent-task-bundle/request.json')
+          out.parent.mkdir(parents=True, exist_ok=True)
+          req = urllib.request.Request(
+              f'{api}/v1/internal/agent-executions/{job_id}/bundle',
+              headers={
+                  'X-Hassan-Callback-Secret': secret,
+                  'User-Agent': 'Frishta-Agent-Task-Prepare/1',
+              },
+              method='GET',
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=60) as response:
+                  data = response.read(2 * 1024 * 1024)
+          except urllib.error.HTTPError as exc:
+              print(exc.read().decode('utf-8', errors='replace'))
+              raise
+          if not data or len(data) >= 2 * 1024 * 1024:
+              raise SystemExit('approved task bundle missing or too large')
+          out.write_bytes(data)
+          print(f'approved bundle fetched ({len(data)} bytes)')
+          PY
+      - name: Upload short-lived private execution bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: frishta-agent-task-bundle-${{ inputs.job_id }}-${{ github.run_id }}
+          path: /tmp/frishta-agent-task-bundle/request.json
+          if-no-files-found: error
+          retention-days: 1
+
+  execute:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      FRISHTA_JOB_ID: ${{ inputs.job_id }}
+      FRISHTA_EXECUTION_BUNDLE: /tmp/frishta-agent-task-bundle/request.json
+      FRISHTA_TASK_OUT_DIR: /tmp/frishta-agent-task
+      FRISHTA_SANDBOX_IMAGE: ubuntu:24.04
+      FRISHTA_TASK_TIMEOUT_SECONDS: "90"
+      GITHUB_TOKEN: ""
+      GH_TOKEN: ""
+      HASSAN_CALLBACK_SECRET: ""
+      HASSAN_API_URL: ""
+      OPENAI_API_KEY: ""
+      GEMINI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: frishta-agent-task-bundle-${{ inputs.job_id }}-${{ github.run_id }}
+          path: /tmp/frishta-agent-task-bundle
+      - name: Install runner dependency only
+        run: pip install httpx==0.28.1
+      - name: Prepare fixed sandbox image before untrusted execution
+        run: docker pull ubuntu:24.04
+      - name: Run exactly one approved ACP prompt in isolated read-only sandbox
+        continue-on-error: true
+        run: python scripts/agent_acp_task_runner.py
+      - name: Assert execution evidence stayed inside P2.9 boundaries
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path('/tmp/frishta-agent-task/agent-acp-task-execution.json')
+          if not path.exists():
+              raise SystemExit('Agent task evidence missing')
+          report = json.loads(path.read_text(encoding='utf-8'))
+          assert report.get('permit_verified') is True
+          assert report.get('files_verified') is True
+          assert report.get('secrets_used') is False
+          assert report.get('auth_attempted') is False
+          assert report.get('network_isolated') is True
+          assert report.get('filesystem_read_only') is True
+          assert report.get('containerized') is True
+          assert report.get('timeout_enforced') is True
+          assert report.get('agent_client_requests') == 0
+          assert sorted(set(report.get('actions') or [])) == ['READ_FILES']
+          report['github_run_id'] = os.environ.get('GITHUB_RUN_ID', '')
+          path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding='utf-8')
+          print('one-time Agent task boundary evidence: PASS')
+          PY
+      - name: Upload execution evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frishta-agent-task-evidence-${{ inputs.job_id }}-${{ github.run_id }}
+          path: /tmp/frishta-agent-task/agent-acp-task-execution.json
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: execute
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: frishta-agent-task-evidence-${{ inputs.job_id }}-${{ github.run_id }}
+          path: /tmp/frishta-agent-task-evidence
+      - name: Publish evidence after untrusted Agent process is gone
+        env:
+          HASSAN_API_URL: ${{ secrets.HASSAN_API_URL }}
+          HASSAN_CALLBACK_SECRET: ${{ secrets.HASSAN_CALLBACK_SECRET }}
+          HASSAN_JOB_ID: ${{ inputs.job_id }}
+        run: |
+          python - <<'PY'
+          import os, urllib.error, urllib.request
+          from pathlib import Path
+          api = os.environ.get('HASSAN_API_URL', '').rstrip('/')
+          secret = os.environ.get('HASSAN_CALLBACK_SECRET', '')
+          job_id = os.environ['HASSAN_JOB_ID']
+          if not api or not secret:
+              raise SystemExit('HASSAN_API_URL and HASSAN_CALLBACK_SECRET are required')
+          path = Path('/tmp/frishta-agent-task-evidence/agent-acp-task-execution.json')
+          req = urllib.request.Request(
+              f'{api}/v1/internal/agent-executions/{job_id}/evidence',
+              data=path.read_bytes(),
+              headers={
+                  'Content-Type': 'application/json',
+                  'X-Hassan-Callback-Secret': secret,
+                  'User-Agent': 'Frishta-Agent-Task-Publisher/1',
+              },
+              method='POST',
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=60) as response:
+                  print(response.read().decode('utf-8'))
+          except urllib.error.HTTPError as exc:
+              print(exc.read().decode('utf-8', errors='replace'))
+              raise
+          PY
+      - name: Fail workflow when one-time task did not pass
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('/tmp/frishta-agent-task-evidence/agent-acp-task-execution.json').read_text(encoding='utf-8'))
+          if not report.get('passed'):
+              raise SystemExit(f"Agent task failed: {(report.get('blockers') or [])[:3]}")
+          print('Agent ACP one-time task passed')
+          PY

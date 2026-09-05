@@ -7,6 +7,8 @@ import re
 import gemini_ui_job as worker_module
 from gemini_ui_job import GeminiTransport, PhoneBridge, execute_tool
 
+_ORIGINAL_SEND_CENTER = worker_module._send_center
+
 
 def _bounds(line: str) -> tuple[int, int, int, int] | None:
     match = re.search(r"bounds=(\d+) (\d+) (\d+) (\d+)", line)
@@ -20,7 +22,7 @@ def _live_send_center(tree: str) -> tuple[int, int] | None:
     The fallback is intentionally constrained to a small control in the same vertical band as the
     non-password editable composer, so the smoke never taps arbitrary page/system controls.
     """
-    semantic = worker_module._send_center(tree)
+    semantic = _ORIGINAL_SEND_CENTER(tree)
     if semantic:
         return semantic
 

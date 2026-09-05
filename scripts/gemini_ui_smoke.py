@@ -46,6 +46,17 @@ def _live_phone_command(
     return _ORIGINAL_PHONE_COMMAND(self, action, args, timeout=max(float(timeout), 90.0))
 
 
+def _ensure_gemini(phone: PhoneBridge) -> dict:
+    """Reassert Gemini foreground immediately before a UI mutation and fail closed otherwise."""
+    last: dict = {}
+    for _ in range(3):
+        last = phone.command("OPEN_APP", {"packageName": worker_module.GEMINI_LAUNCH_PACKAGE})
+        if last.get("status") == "COMPLETED" and last.get("activePackage") in worker_module.GEMINI_FOREGROUND_PACKAGES:
+            return last
+        time.sleep(0.5)
+    raise RuntimeError(f"Gemini foreground could not be reasserted: {last}")
+
+
 def _editable_target(tree: str) -> str | None:
     """Return the exact non-password editable node id from the verified Gemini tree."""
     for line in tree.splitlines():
@@ -142,16 +153,18 @@ def _live_send(self: GeminiTransport, text: str) -> None:
     if not text or len(text) > worker_module.MAX_TEXT:
         raise ValueError("Gemini message exceeds worker limit")
     last_message = ""
-    for _ in range(2):
+    for _ in range(4):
         tree = self._tree(reopen=True)
         target = _editable_target(tree)
         if not target:
             raise RuntimeError("Gemini safe editable field not found")
+        _ensure_gemini(self.phone)
         result = self.phone.command("SET_TEXT", {"targetText": target, "text": text})
         if result.get("status") == "COMPLETED" and result.get("activePackage") in worker_module.GEMINI_FOREGROUND_PACKAGES:
-            tree = self._tree()
+            tree = self._tree(reopen=True)
             send = _live_send_center(tree)
             if send:
+                _ensure_gemini(self.phone)
                 tapped = self.phone.command("TAP", {"x": send[0], "y": send[1]})
                 if tapped.get("status") == "COMPLETED" and tapped.get("activePackage") in worker_module.GEMINI_FOREGROUND_PACKAGES:
                     return
@@ -159,12 +172,14 @@ def _live_send(self: GeminiTransport, text: str) -> None:
                 continue
             for label in ("إرسال", "Send"):
                 try:
+                    _ensure_gemini(self.phone)
                     clicked = self.phone.command("CLICK_TEXT", {"targetText": label}, timeout=15.0)
                     if clicked.get("status") == "COMPLETED" and clicked.get("activePackage") in worker_module.GEMINI_FOREGROUND_PACKAGES:
                         return
                 except Exception:
                     pass
-            raise RuntimeError("Gemini send control not found")
+            last_message = "Gemini send control not found after foreground reassertion"
+            continue
         last_message = f"Gemini SET_TEXT failed: {result.get('message')} active={result.get('activePackage')}"
     raise RuntimeError(last_message or "Gemini text entry failed")
 
@@ -180,26 +195,29 @@ def _clean_chat_ready(tree: str) -> bool:
 
 
 def _start_clean_chat(transport: GeminiTransport) -> None:
-    """Isolate the smoke from stale protocol history in the previously open Gemini conversation."""
-    tree = transport._tree(reopen=True)
-    if _clean_chat_ready(tree):
-        return
+    """Isolate the smoke from stale protocol history while tolerating benign foreground drift."""
+    last: dict | None = None
+    for _ in range(4):
+        tree = transport._tree(reopen=True)
+        if _clean_chat_ready(tree):
+            return
 
-    labels = tuple(label for label in ("محادثة جديدة", "جديدة", "New chat") if label in tree)
-    if not labels:
-        raise RuntimeError("Gemini new-chat control not found")
+        labels = tuple(label for label in ("محادثة جديدة", "جديدة", "New chat") if label in tree)
+        if not labels:
+            raise RuntimeError("Gemini new-chat control not found")
 
-    last = None
-    for label in labels:
-        try:
-            last = transport.phone.command("CLICK_TEXT", {"targetText": label}, timeout=20.0)
-            if last.get("status") == "COMPLETED" and last.get("activePackage") in worker_module.GEMINI_FOREGROUND_PACKAGES:
+        for label in labels:
+            try:
+                _ensure_gemini(transport.phone)
+                last = transport.phone.command("CLICK_TEXT", {"targetText": label}, timeout=20.0)
+                if last.get("status") != "COMPLETED" or last.get("activePackage") not in worker_module.GEMINI_FOREGROUND_PACKAGES:
+                    continue
                 time.sleep(1.0)
-                fresh = transport._tree()
+                fresh = transport._tree(reopen=True)
                 if _clean_chat_ready(fresh):
                     return
-        except Exception:
-            pass
+            except Exception:
+                continue
     raise RuntimeError(f"Gemini new-chat isolation failed: {last}")
 
 

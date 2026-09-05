@@ -59,13 +59,7 @@ def _editable_target(tree: str) -> str | None:
 
 
 def _assistant_only_tree(tree: str) -> str:
-    """Keep only Gemini answer text nodes, never the user's prompt/history nodes.
-
-    The Android accessibility tree contains both sides of the conversation. Scanning the full tree
-    can mistake protocol examples inside our own prompt (or stale older turns) for Gemini output.
-    Current Gemini exposes model answer text under assistant_robin_text and user text separately as
-    assistant_robin_user_message_text, so fail closed to the model-answer node here.
-    """
+    """Keep only Gemini answer text nodes, never the user's prompt/history nodes."""
     lines: list[str] = []
     for line in tree.splitlines():
         if "assistant_robin_user_message_text" in line:
@@ -183,12 +177,13 @@ def main() -> None:
     phone = PhoneBridge()
     transport = GeminiTransport(phone)
     nonce = "smoke-" + uuid.uuid4().hex[:12]
+
+    # Keep the first turn deliberately single-purpose. Mentioning the later FINAL response here made
+    # Gemini occasionally skip the required tool call and jump directly to the final marker.
     prompt = (
-        "Frishta transport smoke test. Do not do anything except the protocol. "
-        "Your first entire reply must be exactly this JSON protocol line, with no explanation: "
-        f'FRISHTA_TOOL:{{"tool":"phone.command","arguments":{{"action":"PING","args":{{}}}},"nonce":"{nonce}"}}. '
-        "After you receive TOOL_RESULT, your entire reply must be exactly: "
-        f'FRISHTA_FINAL:{{"summary":"gemini-tool-gateway-ok","nonce":"{nonce}"}}'
+        "Frishta transport smoke test. Do not do anything except this one protocol response. "
+        "Your entire reply must be exactly this one line, with no explanation and no final response yet: "
+        f'FRISHTA_TOOL:{{"tool":"phone.command","arguments":{{"action":"PING","args":{{}}}},"nonce":"{nonce}"}}'
     )
     transport.send(prompt)
     kind, payload = _await_fresh_protocol(transport, nonce, timeout=120.0)
@@ -206,7 +201,7 @@ def main() -> None:
     result_json = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
     transport.send(
         "TOOL_RESULT=" + result_json + "\n"
-        "PROTOCOL REQUIREMENT: do not explain or paraphrase. Your entire next reply must be exactly: "
+        "The tool result above completes the smoke test. Your entire reply must now be exactly this one line, with no explanation: "
         f'FRISHTA_FINAL:{{"summary":"gemini-tool-gateway-ok","nonce":"{nonce}"}}'
     )
     kind, payload = _await_fresh_protocol(transport, nonce, timeout=120.0)

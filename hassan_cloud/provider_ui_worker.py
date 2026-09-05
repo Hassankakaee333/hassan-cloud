@@ -1,7 +1,7 @@
-"""Phone-backed provider worker using the official app UI and the shared Tool Gateway.
+"""Phone-backed Gemini worker using the official Android UI and the shared Tool Gateway.
 
-No provider API key is used. The worker drives only the already signed-in Android app through
-Phone Agent accessibility, asks the model for a tiny machine-readable tool protocol, executes
+No provider API key is used. The worker drives only the already signed-in Gemini UI through
+Phone Agent accessibility, asks Gemini for a tiny machine-readable tool protocol, executes
 allowlisted tools server-side, and feeds bounded results back. Stable/main and secret input remain
 blocked by ToolGateway.
 """
@@ -19,7 +19,12 @@ from .tool_gateway import ToolGateway, tool_catalog
 _POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="frishta-provider-ui")
 _MARKER_TOOL = "FRISHTA_TOOL:"
 _MARKER_FINAL = "FRISHTA_FINAL:"
-_GEMINI_PACKAGE = "com.google.android.apps.bard"
+_GEMINI_LAUNCH_PACKAGE = "com.google.android.apps.bard"
+# On current Google builds the Gemini surface can be hosted by the Google app process.
+_GEMINI_PACKAGES = {
+    "com.google.android.apps.bard",
+    "com.google.android.googlequicksearchbox",
+}
 _SEND_LABELS = ("إرسال", "Send", "Submit")
 
 
@@ -79,6 +84,10 @@ def _node_center(ui_tree: str, *, editable: bool = False, labels: tuple[str, ...
     return None
 
 
+def _is_gemini_package(package: str | None) -> bool:
+    return bool(package and package in _GEMINI_PACKAGES)
+
+
 class GeminiUiWorker:
     def __init__(self, repo, new_id: Callable[[], str], now_ms: Callable[[], int]) -> None:
         self.repo = repo
@@ -123,17 +132,38 @@ class GeminiUiWorker:
             time.sleep(1.5)
         raise TimeoutError(f"phone action timed out: {action}")
 
-    def _tree(self) -> str:
+    def _tree_data(self) -> dict[str, Any]:
         data = self._phone("UI_TREE")
-        if data.get("activePackage") != _GEMINI_PACKAGE:
-            raise RuntimeError(f"Gemini is not foreground; active={data.get('activePackage')}")
-        return str(data.get("uiTree") or "")
+        active = data.get("activePackage")
+        if not _is_gemini_package(active):
+            raise RuntimeError(f"Gemini is not foreground; active={active}")
+        return data
+
+    def _tree(self) -> str:
+        return str(self._tree_data().get("uiTree") or "")
+
+    def _open_gemini(self, timeout: float = 20.0) -> None:
+        # OPEN_APP completion can report the previous foreground package on some Android builds,
+        # so verify by polling UI_TREE instead of trusting the immediate command result.
+        self._phone("OPEN_APP", {"packageName": _GEMINI_LAUNCH_PACKAGE})
+        deadline = time.monotonic() + timeout
+        last_active: str | None = None
+        while time.monotonic() < deadline:
+            data = self._phone("UI_TREE")
+            last_active = data.get("activePackage")
+            if _is_gemini_package(last_active):
+                return
+            time.sleep(1.0)
+        raise RuntimeError(f"Gemini did not reach foreground; active={last_active}")
 
     def _enter_and_send(self, text: str) -> None:
         tree = self._tree()
         editable = _node_center(tree, editable=True)
-        if editable:
-            self._phone("TAP", {"x": editable[0], "y": editable[1]})
+        if not editable:
+            raise RuntimeError("Gemini editable input not found")
+        self._phone("TAP", {"x": editable[0], "y": editable[1]})
+        # Re-check foreground immediately before SET_TEXT so text cannot be written into another app.
+        self._tree()
         self._phone("SET_TEXT", {"targetText": "", "text": text})
         tree = self._tree()
         send = _node_center(tree, labels=_SEND_LABELS)
@@ -143,6 +173,7 @@ class GeminiUiWorker:
         for label in _SEND_LABELS:
             try:
                 self._phone("CLICK_TEXT", {"targetText": label}, timeout=12.0)
+                self._tree()
                 return
             except Exception:
                 pass
@@ -170,7 +201,7 @@ class GeminiUiWorker:
 
     def _run(self, job_id: str, goal: str, max_steps: int) -> None:
         self.repo.update_job(job_id, "RUNNING", "[gemini-ui] opening official Gemini app\n", None, self.now_ms())
-        self._phone("OPEN_APP", {"packageName": _GEMINI_PACKAGE})
+        self._open_gemini()
         self._enter_and_send(self._initial_prompt(goal))
 
         for step in range(max_steps):

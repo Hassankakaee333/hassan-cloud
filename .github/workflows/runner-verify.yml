@@ -23,7 +23,9 @@ on:
       - "tests/test_agent_executor_dispatch.py"
       - "tests/test_agent_acp_task_runner.py"
       - "tests/test_agent_executor_api.py"
+      - "tests/test_agent_executor_secure_api.py"
       - "tests/test_agent_executor_workflow_contract.py"
+      - "tests/test_device_identity.py"
       - ".github/workflows/hassan-job.yml"
       - ".github/workflows/agent-artifact-verify.yml"
       - ".github/workflows/agent-acp-benchmark.yml"
@@ -61,7 +63,9 @@ jobs:
           tests/test_agent_executor_dispatch.py
           tests/test_agent_acp_task_runner.py
           tests/test_agent_executor_api.py
+          tests/test_agent_executor_secure_api.py
           tests/test_agent_executor_workflow_contract.py
+          tests/test_device_identity.py
       - name: Install cloud requirements and Codex SDK for API-shape validation
         run: pip install -r requirements.txt openai-codex
       - name: Verify Codex SDK surface without login or execution
@@ -91,11 +95,14 @@ jobs:
           assert not _allowed_source_path("secrets.txt")
           print("manual Codex path guard: PASS")
           PY
-      - name: Verify production entrypoint exposes Agent Lab APIs
+      - name: Verify production entrypoint exposes signed Agent Lab APIs
         run: |
           python - <<'PY'
           from hassan_cloud.entrypoint import app
           paths = set(app.openapi().get("paths", {}).keys())
+          assert "/v1/device-identities/enroll" in paths, paths
+          assert "/v1/device-identities/{device_id}" in paths, paths
+          assert "/v1/device-identities/{device_id}/rotate" in paths, paths
           assert "/v1/agent-verifications" in paths, paths
           assert "/v1/agent-verifications/{job_id}" in paths, paths
           assert "/v1/internal/agent-verifications/{job_id}/evidence" in paths, paths
@@ -109,7 +116,9 @@ jobs:
           assert "/v1/agent-executions/{job_id}" in paths, paths
           assert "/v1/internal/agent-executions/{job_id}/bundle" in paths, paths
           assert "/v1/internal/agent-executions/{job_id}/evidence" in paths, paths
-          print("Agent Lab entrypoint OpenAPI routes: PASS")
+          schema = app.openapi()["paths"]["/v1/agent-executions"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+          assert "SignedAgentExecutionRequest" in str(schema), schema
+          print("signed Agent Lab entrypoint OpenAPI routes: PASS")
           PY
       - name: Verify cloud runtime guards without invoking providers or live Agents
         run: >-
@@ -130,4 +139,6 @@ jobs:
           tests/test_agent_executor_dispatch.py
           tests/test_agent_acp_task_runner.py
           tests/test_agent_executor_api.py
+          tests/test_agent_executor_secure_api.py
           tests/test_agent_executor_workflow_contract.py
+          tests/test_device_identity.py

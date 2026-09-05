@@ -36,7 +36,7 @@ from agent_acp_benchmark_runner import (
     safe_extract_for_execution,
     validate_initialize_response,
 )
-from agent_acp_shadow_runner import _auth_methods_count, _session_new_request, _validate_session_new_response
+from agent_acp_shadow_runner import _auth_methods_count, _validate_session_new_response
 
 MAX_FILE_BYTES = 256 * 1024
 MAX_TOTAL_FILE_BYTES = 1024 * 1024
@@ -167,6 +167,19 @@ def _read_frame(process: subprocess.Popen, timeout_seconds: int) -> str:
     return raw
 
 
+def _task_session_new_request() -> str:
+    return json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/new",
+            "params": {"cwd": "/workspace", "mcpServers": []},
+        },
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
 def _prompt_request(session_id: str, goal: str) -> str:
     return json.dumps({
         "jsonrpc": "2.0",
@@ -176,15 +189,19 @@ def _prompt_request(session_id: str, goal: str) -> str:
     }, separators=(",", ":"), ensure_ascii=False)
 
 
-def _read_prompt_turn(process: subprocess.Popen, timeout_seconds: int) -> tuple[str, str, int, str]:
+def _read_prompt_turn(
+    process: subprocess.Popen,
+    timeout_seconds: int,
+    execution_state: dict[str, object],
+) -> tuple[str, str, str]:
     updates: list[str] = []
     total = 0
-    client_requests = 0
     deadline = time.monotonic() + timeout_seconds
     for _index in range(MAX_UPDATE_FRAMES + 1):
-        remaining = int(max(1, deadline - time.monotonic()))
-        if remaining <= 0:
+        delta = deadline - time.monotonic()
+        if delta <= 0:
             raise TimeoutError("ACP prompt turn timed out")
+        remaining = max(1, int(delta))
         raw = _read_frame(process, remaining)
         payload = json.loads(raw)
         if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
@@ -198,7 +215,7 @@ def _read_prompt_turn(process: subprocess.Popen, timeout_seconds: int) -> tuple[
             stop_reason = str(result.get("stopReason") or "").strip()
             if not stop_reason:
                 raise ValueError("ACP session/prompt stopReason missing")
-            return raw, "\n".join(updates), client_requests, stop_reason
+            return raw, "\n".join(updates), stop_reason
         if payload.get("method") == "session/update" and payload.get("id") is None:
             encoded = raw.encode("utf-8")
             total += len(encoded) + 1
@@ -207,7 +224,7 @@ def _read_prompt_turn(process: subprocess.Popen, timeout_seconds: int) -> tuple[
             updates.append(raw)
             continue
         if payload.get("method") is not None:
-            client_requests += 1
+            execution_state["agent_client_requests"] = int(execution_state.get("agent_client_requests", 0)) + 1
             raise ValueError(f"Agent->Client request/notification forbidden: {str(payload.get('method'))[:80]}")
         raise ValueError("unexpected ACP frame before prompt response")
     raise ValueError("too many ACP update frames")
@@ -235,12 +252,19 @@ def run_task_in_sandbox(
     goal: str,
     job_id: str,
     stderr_path: Path,
-) -> tuple[str, str, str, str, int, int]:
+    execution_state: dict[str, object],
+) -> tuple[str, str, str, str, int, str]:
     image = _env("FRISHTA_SANDBOX_IMAGE", required=False) or DEFAULT_SANDBOX_IMAGE
     timeout_seconds = int(_env("FRISHTA_TASK_TIMEOUT_SECONDS", required=False) or DEFAULT_TIMEOUT_SECONDS)
     if timeout_seconds < 10 or timeout_seconds > 180:
         raise ValueError("task timeout outside safe range")
-    inspect = subprocess.run(["docker", "image", "inspect", image], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+    inspect = subprocess.run(
+        ["docker", "image", "inspect", image],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        timeout=15,
+    )
     if inspect.returncode != 0:
         raise RuntimeError("sandbox image unavailable")
     safe_job = re.sub(r"[^A-Za-z0-9_.-]", "-", job_id)[:80]
@@ -261,21 +285,30 @@ def run_task_in_sandbox(
     start = time.monotonic()
     with stderr_path.open("wb") as stderr_handle:
         process = subprocess.Popen(docker_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr_handle)
+        execution_state["artifact_executed"] = True
         try:
             assert process.stdin is not None
-            process.stdin.write((_initialize_request(1) + "\n").encode("utf-8")); process.stdin.flush()
+            process.stdin.write((_initialize_request(1) + "\n").encode("utf-8"))
+            process.stdin.flush()
             initialize_raw = _read_frame(process, 15)
             validate_initialize_response(initialize_raw, 1, version)
             if _auth_methods_count(initialize_raw) != 0:
                 raise ValueError("Agent advertises auth methods; P2.9 forbids authentication")
-            process.stdin.write((_session_new_request() + "\n").encode("utf-8")); process.stdin.flush()
+
+            process.stdin.write((_task_session_new_request() + "\n").encode("utf-8"))
+            process.stdin.flush()
             session_raw = _read_frame(process, 15)
             session = _validate_session_new_response(session_raw)
-            process.stdin.write((_prompt_request(session["session_id"], goal) + "\n").encode("utf-8")); process.stdin.flush()
-            prompt_raw, updates_jsonl, client_requests, stop_reason = _read_prompt_turn(process, timeout_seconds)
+            execution_state["session_created"] = True
+            execution_state["session_id"] = session["session_id"]
+
+            process.stdin.write((_prompt_request(session["session_id"], goal) + "\n").encode("utf-8"))
+            process.stdin.flush()
+            execution_state["prompt_sent"] = True
+            prompt_raw, updates_jsonl, stop_reason = _read_prompt_turn(process, timeout_seconds, execution_state)
             elapsed_ms = int((time.monotonic() - start) * 1000)
             process.stdin.close()
-            return initialize_raw, session_raw, prompt_raw, updates_jsonl, client_requests, elapsed_ms, stop_reason
+            return initialize_raw, session_raw, prompt_raw, updates_jsonl, elapsed_ms, stop_reason
         finally:
             _force_remove_container(name)
             if process.poll() is None:
@@ -304,15 +337,32 @@ def _base_report(bundle: dict) -> dict:
         "command": str(bundle.get("command") or ""),
         "args": list(bundle.get("args") or []),
         "actions": list(bundle.get("actions") or []),
-        "permit_verified": False, "files_verified": False, "file_count": 0,
-        "artifact_executed": False, "secrets_used": False, "auth_attempted": False,
-        "prompt_sent": False, "agent_client_requests": 0,
-        "network_isolated": True, "filesystem_read_only": True, "containerized": True,
-        "timeout_enforced": True, "archive_safe": False, "session_created": False,
-        "session_id": "", "prompt_response_json": "", "stop_reason": "",
-        "session_updates_jsonl": "", "updates_count": 0, "updates_sha256": "",
-        "execution_ms": 0, "stderr_bytes": 0, "stderr_sha256": "",
-        "passed": False, "blockers": [], "warnings": [],
+        "permit_verified": False,
+        "files_verified": False,
+        "file_count": 0,
+        "artifact_executed": False,
+        "secrets_used": False,
+        "auth_attempted": False,
+        "prompt_sent": False,
+        "agent_client_requests": 0,
+        "network_isolated": True,
+        "filesystem_read_only": True,
+        "containerized": True,
+        "timeout_enforced": True,
+        "archive_safe": False,
+        "session_created": False,
+        "session_id": "",
+        "prompt_response_json": "",
+        "stop_reason": "",
+        "session_updates_jsonl": "",
+        "updates_count": 0,
+        "updates_sha256": "",
+        "execution_ms": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "",
+        "passed": False,
+        "blockers": [],
+        "warnings": [],
     }
 
 
@@ -320,6 +370,13 @@ def run() -> tuple[dict, int]:
     bundle_path = Path(_env("FRISHTA_EXECUTION_BUNDLE"))
     bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
     report = _base_report(bundle)
+    execution_state: dict[str, object] = {
+        "artifact_executed": False,
+        "session_created": False,
+        "session_id": "",
+        "prompt_sent": False,
+        "agent_client_requests": 0,
+    }
     try:
         files = validate_bundle(bundle)
         report["permit_verified"] = True
@@ -354,25 +411,32 @@ def run() -> tuple[dict, int]:
             workspace = temp / "workspace"
             _write_workspace(workspace, files)
             stderr_path = temp / "agent.stderr"
-            report["artifact_executed"] = True
-            report["prompt_sent"] = True
             try:
-                init_raw, session_raw, prompt_raw, updates, client_requests, elapsed_ms, stop_reason = run_task_in_sandbox(
-                    execution_root, workspace, command, args, str(bundle.get("version") or ""),
-                    str(bundle.get("goal") or ""), job_id, stderr_path,
+                init_raw, session_raw, prompt_raw, updates, elapsed_ms, stop_reason = run_task_in_sandbox(
+                    execution_root,
+                    workspace,
+                    command,
+                    args,
+                    str(bundle.get("version") or ""),
+                    str(bundle.get("goal") or ""),
+                    job_id,
+                    stderr_path,
+                    execution_state,
                 )
-                session = _validate_session_new_response(session_raw)
-                report["session_created"] = True
-                report["session_id"] = session["session_id"]
                 report["prompt_response_json"] = prompt_raw
                 report["stop_reason"] = stop_reason
                 report["session_updates_jsonl"] = updates
                 report["updates_count"] = 0 if not updates else len(updates.splitlines())
                 report["updates_sha256"] = hashlib.sha256(updates.encode("utf-8")).hexdigest()
-                report["agent_client_requests"] = client_requests
                 report["execution_ms"] = elapsed_ms
                 report["initialize_response_sha256"] = hashlib.sha256(init_raw.encode("utf-8")).hexdigest()
+                report["session_new_response_sha256"] = hashlib.sha256(session_raw.encode("utf-8")).hexdigest()
             finally:
+                report["artifact_executed"] = bool(execution_state["artifact_executed"])
+                report["session_created"] = bool(execution_state["session_created"])
+                report["session_id"] = str(execution_state["session_id"])
+                report["prompt_sent"] = bool(execution_state["prompt_sent"])
+                report["agent_client_requests"] = int(execution_state["agent_client_requests"])
                 if stderr_path.exists():
                     raw = stderr_path.read_bytes()[:MAX_STDERR_BYTES]
                     report["stderr_bytes"] = stderr_path.stat().st_size
@@ -381,15 +445,30 @@ def run() -> tuple[dict, int]:
                         report["warnings"].append("stderr_truncated_for_hash")
 
         report["passed"] = all((
-            report["permit_verified"], report["files_verified"], report["artifact_executed"],
-            report["prompt_sent"], report["network_isolated"], report["filesystem_read_only"],
-            report["containerized"], report["timeout_enforced"], report["archive_safe"],
-            report["session_created"], not report["secrets_used"], not report["auth_attempted"],
-            report["agent_client_requests"] == 0, bool(report["prompt_response_json"]), bool(report["stop_reason"]),
+            report["permit_verified"],
+            report["files_verified"],
+            report["artifact_executed"],
+            report["prompt_sent"],
+            report["network_isolated"],
+            report["filesystem_read_only"],
+            report["containerized"],
+            report["timeout_enforced"],
+            report["archive_safe"],
+            report["session_created"],
+            not report["secrets_used"],
+            not report["auth_attempted"],
+            report["agent_client_requests"] == 0,
+            bool(report["prompt_response_json"]),
+            bool(report["stop_reason"]),
             not report["blockers"],
         ))
         return report, 0 if report["passed"] else 2
     except Exception as exc:
+        report["artifact_executed"] = bool(execution_state["artifact_executed"])
+        report["session_created"] = bool(execution_state["session_created"])
+        report["session_id"] = str(execution_state["session_id"])
+        report["prompt_sent"] = bool(execution_state["prompt_sent"])
+        report["agent_client_requests"] = int(execution_state["agent_client_requests"])
         report["passed"] = False
         report["blockers"].append(f"task_error:{type(exc).__name__}:{exc}")
         return report, 2

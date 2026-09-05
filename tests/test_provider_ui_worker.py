@@ -1,9 +1,9 @@
-from hassan_cloud.provider_ui_worker import _extract_marker, _node_center
+from hassan_cloud.provider_ui_worker import _extract_marker, _is_gemini_package, _node_center
 
 
 def test_extracts_tool_call_from_accessibility_tree():
     tree = (
-        '1|com.google.android.apps.bard|android.view.View|text=FRISHTA_TOOL:{"tool":"cloud.jobs.list","arguments":{}}|desc=|bounds=0 0 10 10|clickable=false|editable=false|password=false\n'
+        '1|com.google.android.googlequicksearchbox|android.view.View|text=FRISHTA_TOOL:{"tool":"cloud.jobs.list","arguments":{}}|desc=|bounds=0 0 10 10|clickable=false|editable=false|password=false\n'
     )
     kind, payload = _extract_marker(tree)
     assert kind == "tool"
@@ -24,6 +24,13 @@ def test_finds_editable_and_send_centers():
     )
     assert _node_center(tree, editable=True) == (300, 250)
     assert _node_center(tree, labels=("إرسال", "Send")) == (950, 250)
+
+
+def test_accepts_both_official_gemini_android_hosts():
+    assert _is_gemini_package("com.google.android.apps.bard")
+    assert _is_gemini_package("com.google.android.googlequicksearchbox")
+    assert not _is_gemini_package("com.openai.chatgpt")
+    assert not _is_gemini_package("com.android.systemui")
 
 
 def test_source_has_no_provider_api_transport():

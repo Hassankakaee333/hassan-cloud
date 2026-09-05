@@ -169,19 +169,36 @@ def _live_send(self: GeminiTransport, text: str) -> None:
     raise RuntimeError(last_message or "Gemini text entry failed")
 
 
+def _clean_chat_ready(tree: str) -> bool:
+    """Require a writable Gemini composer and no visible protocol/user-message history."""
+    if not _editable_target(tree):
+        return False
+    if "assistant_robin_user_message_text" in tree:
+        return False
+    assistant_tree = _assistant_only_tree(tree)
+    return "FRISHTA_TOOL" not in assistant_tree and "FRISHTA_FINAL" not in assistant_tree
+
+
 def _start_clean_chat(transport: GeminiTransport) -> None:
     """Isolate the smoke from stale protocol history in the previously open Gemini conversation."""
     tree = transport._tree(reopen=True)
-    if "محادثة جديدة" not in tree and "New chat" not in tree:
+    if _clean_chat_ready(tree):
+        return
+
+    # Gemini's Arabic UI currently exposes the compact new-chat control as "جديدة".
+    # Keep the older full Arabic label and English label for UI-version compatibility.
+    labels = tuple(label for label in ("محادثة جديدة", "جديدة", "New chat") if label in tree)
+    if not labels:
         raise RuntimeError("Gemini new-chat control not found")
+
     last = None
-    for label in ("محادثة جديدة", "New chat"):
+    for label in labels:
         try:
             last = transport.phone.command("CLICK_TEXT", {"targetText": label}, timeout=20.0)
             if last.get("status") == "COMPLETED" and last.get("activePackage") in worker_module.GEMINI_FOREGROUND_PACKAGES:
                 time.sleep(1.0)
                 fresh = transport._tree()
-                if _editable_target(fresh):
+                if _clean_chat_ready(fresh):
                     return
         except Exception:
             pass

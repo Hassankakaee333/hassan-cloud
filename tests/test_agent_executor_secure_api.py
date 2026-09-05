@@ -50,19 +50,37 @@ class FakeRepo:
     def update_job(self, job_id, state, log_append, summary, ts):
         self.jobs[job_id]["state"] = state
         self.jobs[job_id]["log"] += log_append
-        self.jobs[job_id]["result_summary"] = summary
+        if summary is not None:
+            self.jobs[job_id]["result_summary"] = summary
 
     def create_artifact(self, row):
         self.artifacts.append(dict(row))
         return dict(row)
 
     def project_workspace(self, project_id):
-        return {"project": self.projects.get(project_id), "artifacts": [a for a in self.artifacts if a.get("project_id") == project_id]}
+        return {
+            "project": self.projects.get(project_id),
+            "artifacts": [a for a in self.artifacts if a.get("project_id") == project_id],
+        }
 
 
 class DummyIdentityStore:
     def __init__(self, repo):
         self.repo = repo
+
+
+class DummyBundleClaimStore:
+    def __init__(self, repo):
+        self.claimed = set()
+
+    def claim_once(self, job_id, claimed_at):
+        if job_id in self.claimed:
+            return False
+        self.claimed.add(job_id)
+        return True
+
+    def is_claimed(self, job_id):
+        return job_id in self.claimed
 
 
 def payload():
@@ -100,12 +118,14 @@ def payload():
 def build_client(monkeypatch, signature_ok=True):
     repo = FakeRepo()
     files = FakeFiles()
-    ids = iter(["exec-1", "request-1", "exec-2", "request-2"])
+    ids = iter([f"generated-{index}" for index in range(1, 30)])
     dispatches = {"count": 0}
 
     monkeypatch.setattr(secure, "DeviceIdentityStore", DummyIdentityStore)
+    monkeypatch.setattr(secure, "AgentExecutionBundleClaimStore", DummyBundleClaimStore)
     monkeypatch.setattr(secure, "_validate_request", lambda body: [])
     monkeypatch.setattr(secure, "_assert_prior_shadow_gate", lambda repo, files, body: None)
+    monkeypatch.setattr(secure, "_callback_authorized", lambda secret: None)
 
     def verify_signature(store, device_id, body, signature):
         if not signature_ok:
@@ -121,6 +141,13 @@ def build_client(monkeypatch, signature_ok=True):
         return AgentExecutionDispatchResult("QUEUED", job_id, "owner/repo", "candidate")
 
     monkeypatch.setattr(secure, "dispatch_agent_execution", dispatch)
+
+    def purge(repo_arg, files_arg, artifact):
+        files_arg.data.pop(artifact["storage_path"], None)
+        repo_arg.artifacts = [item for item in repo_arg.artifacts if item.get("id") != artifact.get("id")]
+
+    monkeypatch.setattr(secure, "purge_private_artifact", purge)
+
     app = FastAPI()
     app.include_router(
         secure.build_secure_agent_execution_router(
@@ -131,22 +158,61 @@ def build_client(monkeypatch, signature_ok=True):
             now_ms=lambda: 1,
         )
     )
-    return TestClient(app), dispatches
+    return TestClient(app), dispatches, repo, files
 
 
 def test_invalid_device_signature_blocks_job_creation(monkeypatch):
-    client, dispatches = build_client(monkeypatch, signature_ok=False)
+    client, dispatches, _repo, _files = build_client(monkeypatch, signature_ok=False)
     response = client.post("/v1/agent-executions", json=payload())
     assert response.status_code == 403
     assert dispatches["count"] == 0
 
 
 def test_same_signed_permit_dispatches_at_most_once(monkeypatch):
-    client, dispatches = build_client(monkeypatch, signature_ok=True)
+    client, dispatches, _repo, _files = build_client(monkeypatch, signature_ok=True)
     first = client.post("/v1/agent-executions", json=payload())
     assert first.status_code == 200, first.text
     assert first.json()["dispatch_status"] == "QUEUED"
     second = client.post("/v1/agent-executions", json=payload())
     assert second.status_code == 200, second.text
     assert second.json()["dispatch_status"] == "EXISTING"
+    assert dispatches["count"] == 1
+
+
+def test_private_bundle_is_delivered_once_and_raw_cloud_request_is_purged(monkeypatch):
+    client, dispatches, repo, _files = build_client(monkeypatch, signature_ok=True)
+    created = client.post("/v1/agent-executions", json=payload())
+    assert created.status_code == 200, created.text
+    job_id = created.json()["id"]
+
+    first = client.get(f"/v1/internal/agent-executions/{job_id}/bundle")
+    assert first.status_code == 200, first.text
+    assert first.headers["cache-control"] == "no-store"
+    assert first.json()["permit_id"] == payload()["permit_id"]
+    names = [item["name"] for item in repo.artifacts]
+    assert "agent-task-execution-request.json" not in names
+    assert "agent-acp-task-request-audit.json" in names
+
+    second = client.get(f"/v1/internal/agent-executions/{job_id}/bundle")
+    assert second.status_code == 409
+    assert "already claimed" in second.text
+    assert dispatches["count"] == 1
+
+
+def test_post_purge_duplicate_must_match_original_signed_request_digest(monkeypatch):
+    client, dispatches, _repo, _files = build_client(monkeypatch, signature_ok=True)
+    created = client.post("/v1/agent-executions", json=payload())
+    assert created.status_code == 200, created.text
+    job_id = created.json()["id"]
+    assert client.get(f"/v1/internal/agent-executions/{job_id}/bundle").status_code == 200
+
+    identical = client.post("/v1/agent-executions", json=payload())
+    assert identical.status_code == 200, identical.text
+    assert identical.json()["dispatch_status"] == "EXISTING"
+
+    changed = payload()
+    changed["execution_request_id"] = "agent-exec-000000000999"
+    different = client.post("/v1/agent-executions", json=changed)
+    assert different.status_code == 409
+    assert "different signed execution request" in different.text
     assert dispatches["count"] == 1

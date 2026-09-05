@@ -1,4 +1,9 @@
-"""GitHub-based RadarSource — discovers real OSS candidates."""
+"""GitHub-based RadarSource — discovers real OSS candidates.
+
+GitHub repository/license metadata is discovery evidence only. It does not establish that the
+actual runtime, model, compute, hosted service, dependencies, auth path, or intended usage is
+free. Cost stays UNVERIFIED until a separate evidence-backed check proves the concrete path.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +18,8 @@ SEARCH_QUERIES = [
     ("autonomous agent llm stars:>300", "AUTOMATION_TOOL"),
     ("local llm inference stars:>1000", "MODEL"),
 ]
+
+USAGE_COST_UNVERIFIED = "UNVERIFIED"
 
 
 def discover_from_github(max_per_query: int = 3) -> list[dict]:
@@ -39,10 +46,13 @@ def discover_from_github(max_per_query: int = 3) -> list[dict]:
                         "source": "github_search",
                         "url": url,
                         "license": (item.get("license") or {}).get("spdx_id") or "UNKNOWN",
-                        "cost_type": "FREE",
+                        "cost_type": USAGE_COST_UNVERIFIED,
                         "capabilities": ["coding"] if "CODING" in candidate_type else ["inference"],
                         "status": "NEW",
-                        "notes": f"stars={item.get('stargazers_count', 0)} query={query}",
+                        "notes": (
+                            f"stars={item.get('stargazers_count', 0)} query={query}; "
+                            "usage cost/runtime not yet verified"
+                        ),
                         "score": min(10.0, (item.get("stargazers_count", 0) / 1000)),
                         "risk": "MEDIUM",
                     })

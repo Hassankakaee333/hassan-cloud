@@ -250,9 +250,7 @@ app.post("/v1/files/upload", authMiddleware, async (c) => {
   return c.json({ detail: "upload via GitHub Actions for POC; direct upload coming soon" }, 501);
 });
 
-// --- Chat (natural local fallback until external LLM keys are configured) ---
-
-// --- Chat (real providers when keys configured; weather via Open-Meteo) ---
+// --- Chat: real external providers are fail-closed; local fallback is Frishta-only. ---
 
 app.post("/v1/chat", authMiddleware, async (c) => {
   const body = await c.req.json<{
@@ -277,6 +275,8 @@ app.get("/v1/capabilities/:capability", authMiddleware, (c) => {
 });
 
 // --- Radar ---
+// A GitHub license/repository is discovery evidence only. It does not prove that installing,
+// hosting, model inference, dependencies, or the desired commercial/runtime path has zero cost.
 
 const RADAR_SEED = [
   {
@@ -286,7 +286,7 @@ const RADAR_SEED = [
     source: "github",
     url: "https://github.com/ollama/ollama",
     license: "MIT",
-    cost_type: "FREE",
+    cost_type: "UNVERIFIED",
     capabilities: '["local_llm","inference"]',
   },
   {
@@ -296,7 +296,7 @@ const RADAR_SEED = [
     source: "github",
     url: "https://github.com/All-Hands-AI/OpenHands",
     license: "MIT",
-    cost_type: "FREE",
+    cost_type: "UNVERIFIED",
     capabilities: '["coding","agents"]',
   },
 ];
@@ -311,6 +311,9 @@ app.post("/v1/radar/scan", authMiddleware, async (c) => {
       await db`INSERT INTO radar_candidates (id, name, candidate_type, source, url, license, cost_type, capabilities, status, discovered_at)
         VALUES (${item.id}, ${item.name}, ${item.candidate_type}, ${item.source}, ${item.url}, ${item.license}, ${item.cost_type}, ${item.capabilities}, ${"NEW"}, ${ts})`;
       seeded++;
+    } else {
+      // Repair legacy optimistic FREE labels without changing the candidate's trust stage.
+      await db`UPDATE radar_candidates SET cost_type = ${item.cost_type} WHERE id = ${item.id}`;
     }
   }
   const candidates = await db`SELECT * FROM radar_candidates ORDER BY discovered_at DESC`;

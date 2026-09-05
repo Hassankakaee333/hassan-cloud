@@ -169,6 +169,25 @@ def _live_send(self: GeminiTransport, text: str) -> None:
     raise RuntimeError(last_message or "Gemini text entry failed")
 
 
+def _start_clean_chat(transport: GeminiTransport) -> None:
+    """Isolate the smoke from stale protocol history in the previously open Gemini conversation."""
+    tree = transport._tree(reopen=True)
+    if "محادثة جديدة" not in tree and "New chat" not in tree:
+        raise RuntimeError("Gemini new-chat control not found")
+    last = None
+    for label in ("محادثة جديدة", "New chat"):
+        try:
+            last = transport.phone.command("CLICK_TEXT", {"targetText": label}, timeout=20.0)
+            if last.get("status") == "COMPLETED" and last.get("activePackage") in worker_module.GEMINI_FOREGROUND_PACKAGES:
+                time.sleep(1.0)
+                fresh = transport._tree()
+                if _editable_target(fresh):
+                    return
+        except Exception:
+            pass
+    raise RuntimeError(f"Gemini new-chat isolation failed: {last}")
+
+
 def main() -> None:
     worker_module._put_phone_file = _live_put_phone_file
     worker_module._send_center = _live_send_center
@@ -177,6 +196,8 @@ def main() -> None:
     phone = PhoneBridge()
     transport = GeminiTransport(phone)
     nonce = "smoke-" + uuid.uuid4().hex[:12]
+
+    _start_clean_chat(transport)
 
     # Keep the first turn deliberately single-purpose. Mentioning the later FINAL response here made
     # Gemini occasionally skip the required tool call and jump directly to the final marker.

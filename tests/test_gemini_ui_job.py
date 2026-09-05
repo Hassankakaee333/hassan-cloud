@@ -83,6 +83,20 @@ def test_atomic_transport_binds_nonce_and_expected_marker(monkeypatch):
     assert "gemini-tool-gateway-ok" in payload
 
 
+def test_phone_command_put_retries_github_409_branch_races(monkeypatch):
+    calls = []
+
+    def flaky_put(path, payload, message):
+        calls.append((path, payload, message))
+        if len(calls) < 3:
+            raise RuntimeError('GitHub HTTP 409: branch moved')
+
+    monkeypatch.setattr(atomic_transport, "_raw_put_phone_file", flaky_put)
+    monkeypatch.setattr(atomic_transport.time, "sleep", lambda _seconds: None)
+    atomic_transport._put_with_retry("inbox/test.json", {"id": "test"}, "test")
+    assert len(calls) == 3
+
+
 def test_worker_uses_no_paid_provider_api_transport():
     source = (
         Path("scripts/gemini_ui_job.py").read_text(encoding="utf-8")

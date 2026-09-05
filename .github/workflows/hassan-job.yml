@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       job_type:
-        description: Job type (coding, general, android_build, workspace_coding, agentos_android, candidate_self_improve, codex_candidate_self_improve, codex_account_snapshot)
+        description: Job type (coding, general, android_build, workspace_coding, agentos_android, candidate_self_improve, gemini_ui_worker, codex_candidate_self_improve, codex_account_snapshot)
         required: true
         type: string
 
@@ -97,7 +97,7 @@ jobs:
           codex --version
 
       - name: Run Hassan job
-        if: inputs.job_type != 'codex_account_snapshot'
+        if: inputs.job_type != 'codex_account_snapshot' && inputs.job_type != 'gemini_ui_worker'
         env:
           HASSAN_JOB_ID: ${{ inputs.job_id }}
           HASSAN_PROJECT_ID: ${{ inputs.project_id }}
@@ -113,6 +113,22 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CODEX_SESSION_CACHE: /tmp/hassan-codex-session/codex-session.enc
         run: python scripts/github_job_runner.py
+
+      - name: Run Gemini official-app Tool Gateway worker
+        if: inputs.job_type == 'gemini_ui_worker'
+        env:
+          HASSAN_JOB_ID: ${{ inputs.job_id }}
+          HASSAN_PROJECT_ID: ${{ inputs.project_id }}
+          HASSAN_JOB_TYPE: ${{ inputs.job_type }}
+          HASSAN_API_URL: ${{ secrets.HASSAN_API_URL }}
+          HASSAN_CALLBACK_SECRET: ${{ secrets.HASSAN_CALLBACK_SECRET }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          HASSAN_CANDIDATE_REPO: ${{ vars.HASSAN_CANDIDATE_REPO }}
+          HASSAN_CANDIDATE_TOKEN: ${{ secrets.HASSAN_CANDIDATE_TOKEN }}
+          FRISHTA_PHONE_REPO: Hassankakaee333/FMK-AI-BRIDGE
+          FRISHTA_PHONE_BRANCH: phone-control
+          GEMINI_UI_MAX_STEPS: "8"
+        run: python scripts/gemini_ui_job_runner.py
 
       - name: Read Codex account snapshot without a model turn
         if: inputs.job_type == 'codex_account_snapshot'
@@ -145,11 +161,23 @@ jobs:
           HASSAN_API_URL: ${{ secrets.HASSAN_API_URL }}
           HASSAN_CALLBACK_SECRET: ${{ secrets.HASSAN_CALLBACK_SECRET }}
           GITHUB_RUN_ID: ${{ github.run_id }}
+          CODEX_SESSION_CACHE: /tmp/hassan-codex-session/codex-session.enc
           HASSAN_RUNNER_MODE: finalize
         run: python scripts/codex_account_snapshot_runner.py
 
+      - name: Finalize Gemini worker after upload
+        if: success() && inputs.job_type == 'gemini_ui_worker'
+        env:
+          HASSAN_JOB_ID: ${{ inputs.job_id }}
+          HASSAN_PROJECT_ID: ${{ inputs.project_id }}
+          HASSAN_API_URL: ${{ secrets.HASSAN_API_URL }}
+          HASSAN_CALLBACK_SECRET: ${{ secrets.HASSAN_CALLBACK_SECRET }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          HASSAN_RUNNER_MODE: finalize
+        run: python scripts/gemini_ui_job_runner.py
+
       - name: Register durable artifact metadata and complete job
-        if: success() && inputs.job_type != 'codex_account_snapshot'
+        if: success() && inputs.job_type != 'codex_account_snapshot' && inputs.job_type != 'gemini_ui_worker'
         env:
           HASSAN_JOB_ID: ${{ inputs.job_id }}
           HASSAN_PROJECT_ID: ${{ inputs.project_id }}
@@ -160,8 +188,19 @@ jobs:
           HASSAN_RUNNER_MODE: finalize
         run: python scripts/github_job_runner.py
 
+      - name: Report Gemini workflow failure
+        if: failure() && inputs.job_type == 'gemini_ui_worker'
+        env:
+          HASSAN_JOB_ID: ${{ inputs.job_id }}
+          HASSAN_PROJECT_ID: ${{ inputs.project_id }}
+          HASSAN_API_URL: ${{ secrets.HASSAN_API_URL }}
+          HASSAN_CALLBACK_SECRET: ${{ secrets.HASSAN_CALLBACK_SECRET }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          HASSAN_RUNNER_MODE: failure
+        run: python scripts/gemini_ui_job_runner.py
+
       - name: Report workflow failure
-        if: failure()
+        if: failure() && inputs.job_type != 'gemini_ui_worker'
         env:
           HASSAN_JOB_ID: ${{ inputs.job_id }}
           HASSAN_PROJECT_ID: ${{ inputs.project_id }}

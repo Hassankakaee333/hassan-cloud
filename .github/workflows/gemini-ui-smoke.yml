@@ -1,0 +1,26 @@
+name: Gemini UI Tool Gateway Smoke (Experimental / Manual Only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install runner dependencies
+        run: pip install -r requirements.txt
+      - name: Run atomic Gemini-app UI smoke
+        env:
+          HASSAN_CANDIDATE_TOKEN: ${{ secrets.HASSAN_CANDIDATE_TOKEN }}
+          HASSAN_CANDIDATE_REPO: ${{ vars.HASSAN_CANDIDATE_REPO }}
+          FRISHTA_PHONE_REPO: Hassankakaee333/FMK-AI-BRIDGE
+          FRISHTA_PHONE_BRANCH: phone-control
+        run: python scripts/gemini_ui_smoke.py

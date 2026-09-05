@@ -6,7 +6,7 @@ from typing import Callable
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from .provider_ui_worker import GeminiUiWorker
+from .provider_ui_worker_compat import GeminiUiWorker
 
 
 class GeminiWorkerRequest(BaseModel):

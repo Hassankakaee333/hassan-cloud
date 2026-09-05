@@ -15,13 +15,14 @@ from gemini_ui_hardening import guard_no_secrets
 INTERNAL_GEMINI_ACTION = "GEMINI_EXCHANGE"
 TOOL_MARKER = "FRISHTA_TOOL:"
 FINAL_MARKER = "FRISHTA_FINAL:"
+_raw_put_phone_file = worker._put_phone_file
 
 
 def _put_with_retry(path: str, payload: dict[str, Any], message: str) -> None:
     last: Exception | None = None
     for attempt in range(8):
         try:
-            worker._put_phone_file(path, payload, message)
+            _raw_put_phone_file(path, payload, message)
             return
         except RuntimeError as exc:
             last = exc
@@ -139,9 +140,10 @@ def _atomic_await_protocol(
 
 
 def install_atomic_transport() -> None:
-    """Install the package-locked transport after generic runtime hardening."""
+    """Install package-locked Gemini transport and conflict-safe phone command writes."""
     if getattr(worker, "_FRISHTA_ATOMIC_TRANSPORT_INSTALLED", False):
         return
+    worker._put_phone_file = _put_with_retry
     worker.GeminiTransport.send = _atomic_send
     worker.GeminiTransport.await_protocol = _atomic_await_protocol
     worker._FRISHTA_ATOMIC_TRANSPORT_INSTALLED = True

@@ -1,12 +1,7 @@
-name: Gemini UI Tool Gateway Smoke (Experimental / Controlled)
+name: Gemini UI Tool Gateway Smoke (Experimental / Manual Only)
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - frishta-gemini-ui-worker-p2-15-20260905
-    paths:
-      - ".github/workflows/gemini-ui-smoke.yml"
 
 permissions:
   contents: read
@@ -22,7 +17,7 @@ jobs:
           python-version: "3.12"
       - name: Install runner dependencies
         run: pip install -r requirements.txt
-      - name: Run controlled Gemini-app UI smoke
+      - name: Run experimental Gemini-app UI smoke
         env:
           HASSAN_CANDIDATE_TOKEN: ${{ secrets.HASSAN_CANDIDATE_TOKEN }}
           HASSAN_CANDIDATE_REPO: ${{ vars.HASSAN_CANDIDATE_REPO }}

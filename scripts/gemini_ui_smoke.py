@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import uuid
 
 import gemini_ui_job as worker_module
 from gemini_ui_job import GeminiTransport, PhoneBridge, execute_tool
@@ -55,6 +56,40 @@ def _editable_target(tree: str) -> str | None:
         if match and match.group(1).strip():
             return match.group(1).strip()
     return None
+
+
+def _assistant_only_tree(tree: str) -> str:
+    """Keep only Gemini answer text nodes, never the user's prompt/history nodes.
+
+    The Android accessibility tree contains both sides of the conversation. Scanning the full tree
+    can mistake protocol examples inside our own prompt (or stale older turns) for Gemini output.
+    Current Gemini exposes model answer text under assistant_robin_text and user text separately as
+    assistant_robin_user_message_text, so fail closed to the model-answer node here.
+    """
+    lines: list[str] = []
+    for line in tree.splitlines():
+        if "assistant_robin_user_message_text" in line:
+            continue
+        if "|id=com.google.android.googlequicksearchbox:id/assistant_robin_text|" in line:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _await_fresh_protocol(transport: GeminiTransport, nonce: str, *, timeout: float = 120.0) -> tuple[str, str]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        tree = transport._tree(reopen=True)
+        marker = worker_module._extract_protocol(_assistant_only_tree(tree))
+        if marker:
+            kind, payload = marker
+            try:
+                obj = json.loads(payload)
+            except json.JSONDecodeError:
+                obj = None
+            if isinstance(obj, dict) and obj.get("nonce") == nonce:
+                return kind, payload
+        time.sleep(2.5)
+    raise TimeoutError("fresh Gemini protocol marker not found")
 
 
 def _live_send_center(tree: str) -> tuple[int, int] | None:
@@ -109,13 +144,7 @@ def _live_send_center(tree: str) -> tuple[int, int] | None:
 
 
 def _live_send(self: GeminiTransport, text: str) -> None:
-    """Set text directly on Gemini's verified editable node; avoid a stale coordinate tap.
-
-    The old transport read Gemini's tree, waited through the GitHub bridge, then tapped old
-    coordinates. A real run proved that the phone could move to Recents before the TAP executed.
-    ACTION_SET_TEXT can target Gemini's exact editable node directly, eliminating that race and one
-    full phone-control round trip. If foreground drift still happens, re-open Gemini once and retry.
-    """
+    """Set text directly on Gemini's verified editable node; avoid a stale coordinate tap."""
     if not text or len(text) > worker_module.MAX_TEXT:
         raise ValueError("Gemini message exceeds worker limit")
     last_message = ""
@@ -153,20 +182,21 @@ def main() -> None:
     GeminiTransport.send = _live_send
     phone = PhoneBridge()
     transport = GeminiTransport(phone)
+    nonce = "smoke-" + uuid.uuid4().hex[:12]
     prompt = (
         "Frishta transport smoke test. Do not do anything except the protocol. "
-        "First reply exactly with this one tool call: "
-        'FRISHTA_TOOL:{"tool":"phone.command","arguments":{"action":"PING","args":{}}}. '
-        "After you receive TOOL_RESULT, reply exactly: "
-        'FRISHTA_FINAL:{"summary":"gemini-tool-gateway-ok"}'
+        "Your first entire reply must be exactly this JSON protocol line, with no explanation: "
+        f'FRISHTA_TOOL:{{"tool":"phone.command","arguments":{{"action":"PING","args":{{}}}},"nonce":"{nonce}"}}. '
+        "After you receive TOOL_RESULT, your entire reply must be exactly: "
+        f'FRISHTA_FINAL:{{"summary":"gemini-tool-gateway-ok","nonce":"{nonce}"}}'
     )
     transport.send(prompt)
-    kind, payload = transport.await_protocol(timeout=120.0)
+    kind, payload = _await_fresh_protocol(transport, nonce, timeout=120.0)
     if kind != "tool":
         raise RuntimeError(f"expected FRISHTA_TOOL, got {kind}: {payload[:300]}")
     call = json.loads(payload)
-    if call.get("tool") != "phone.command":
-        raise RuntimeError(f"unexpected tool: {call.get('tool')}")
+    if call.get("tool") != "phone.command" or call.get("nonce") != nonce:
+        raise RuntimeError(f"unexpected tool payload: {call}")
     arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
     if str(arguments.get("action") or "").upper() != "PING":
         raise RuntimeError("smoke test only permits phone.command PING")
@@ -176,14 +206,14 @@ def main() -> None:
     result_json = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
     transport.send(
         "TOOL_RESULT=" + result_json + "\n"
-        "PROTOCOL REQUIREMENT: Do not explain or paraphrase this result. Your entire next reply must be exactly: "
-        'FRISHTA_FINAL:{"summary":"gemini-tool-gateway-ok"}'
+        "PROTOCOL REQUIREMENT: do not explain or paraphrase. Your entire next reply must be exactly: "
+        f'FRISHTA_FINAL:{{"summary":"gemini-tool-gateway-ok","nonce":"{nonce}"}}'
     )
-    kind, payload = transport.await_protocol(timeout=120.0)
+    kind, payload = _await_fresh_protocol(transport, nonce, timeout=120.0)
     if kind != "final":
         raise RuntimeError(f"expected FRISHTA_FINAL, got {kind}: {payload[:300]}")
     final = json.loads(payload)
-    if final.get("summary") != "gemini-tool-gateway-ok":
+    if final.get("summary") != "gemini-tool-gateway-ok" or final.get("nonce") != nonce:
         raise RuntimeError(f"unexpected final summary: {final}")
     print("GEMINI_TOOL_GATEWAY_SMOKE_OK")
 

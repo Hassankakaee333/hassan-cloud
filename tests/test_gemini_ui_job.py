@@ -5,8 +5,10 @@ import pytest
 
 sys.path.insert(0, "scripts")
 
+import gemini_ui_atomic_transport as atomic_transport
 from gemini_ui_job import (
     GEMINI_FOREGROUND_PACKAGES,
+    PHONE_ACTIONS,
     _extract_protocol,
     _safe_candidate_ref,
     tool_catalog,
@@ -45,8 +47,47 @@ def test_catalog_has_shared_phone_cloud_github_tools_without_codex():
     assert not any("codex" in name.lower() for name in names)
 
 
+def test_atomic_gemini_exchange_is_transport_private_not_public_phone_action():
+    assert atomic_transport.INTERNAL_GEMINI_ACTION == "GEMINI_EXCHANGE"
+    assert "GEMINI_EXCHANGE" not in PHONE_ACTIONS
+    catalog_text = "\n".join(item["name"] + " " + item["description"] for item in tool_catalog())
+    assert "GEMINI_EXCHANGE" not in catalog_text
+
+
+def test_atomic_transport_binds_nonce_and_expected_marker(monkeypatch):
+    calls = []
+
+    def fake_exchange(text, *, expected_marker, nonce, timeout):
+        calls.append((text, expected_marker, nonce, timeout))
+        if expected_marker == atomic_transport.TOOL_MARKER:
+            return f'FRISHTA_TOOL:{{"tool":"phone.command","arguments":{{"action":"PING"}},"nonce":"{nonce}"}}'
+        return f'FRISHTA_FINAL:{{"summary":"gemini-tool-gateway-ok","nonce":"{nonce}"}}'
+
+    monkeypatch.setattr(atomic_transport, "_internal_gemini_exchange", fake_exchange)
+
+    class DummyTransport:
+        pass
+
+    transport = DummyTransport()
+    atomic_transport._atomic_send(transport, "initial")
+    assert calls[-1][1] == atomic_transport.TOOL_MARKER
+    assert "FRISHTA_NONCE=s-" in calls[-1][0]
+    kind, payload = atomic_transport._atomic_await_protocol(transport)
+    assert kind == "tool"
+    assert '"PING"' in payload
+
+    atomic_transport._atomic_send(transport, "TOOL_RESULT={\"status\":\"OK\"}")
+    assert calls[-1][1] == atomic_transport.FINAL_MARKER
+    kind, payload = atomic_transport._atomic_await_protocol(transport)
+    assert kind == "final"
+    assert "gemini-tool-gateway-ok" in payload
+
+
 def test_worker_uses_no_paid_provider_api_transport():
-    source = Path("scripts/gemini_ui_job.py").read_text(encoding="utf-8").lower()
+    source = (
+        Path("scripts/gemini_ui_job.py").read_text(encoding="utf-8")
+        + Path("scripts/gemini_ui_atomic_transport.py").read_text(encoding="utf-8")
+    ).lower()
     assert "generativelanguage.googleapis.com" not in source
     assert "api.openai.com" not in source
     assert "api.deepseek.com" not in source
@@ -55,7 +96,10 @@ def test_worker_uses_no_paid_provider_api_transport():
 
 def test_workflow_routes_gemini_to_dedicated_worker_and_keeps_codex_manual():
     workflow = Path(".github/workflows/hassan-job.yml").read_text(encoding="utf-8")
+    runner = Path("scripts/gemini_ui_job_runner.py").read_text(encoding="utf-8")
     assert "inputs.job_type == 'gemini_ui_worker'" in workflow
     assert "python scripts/gemini_ui_job_runner.py" in workflow
     assert "Install Codex Python SDK only for explicit execution" in workflow
     assert "if: inputs.job_type == 'codex_candidate_self_improve'" in workflow
+    assert "install_runtime_hardening()" in runner
+    assert "install_atomic_transport()" in runner

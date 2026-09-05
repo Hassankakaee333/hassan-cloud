@@ -4,12 +4,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import sys
 from pathlib import Path
 
 import httpx
 
-from gemini_ui_job import run_gemini_ui_job
+import gemini_ui_job as worker_module
+from gemini_ui_hardening import install_runtime_hardening
 
 API_URL = os.environ.get("HASSAN_API_URL", "").rstrip("/")
 CALLBACK_SECRET = os.environ.get("HASSAN_CALLBACK_SECRET", "")
@@ -111,8 +111,9 @@ def main() -> None:
             github_run_id=GITHUB_RUN_ID,
         )
         return
+    install_runtime_hardening()
     try:
-        run_gemini_ui_job(
+        worker_module.run_gemini_ui_job(
             job_id=JOB_ID,
             project_id=PROJECT_ID,
             update_job=update_job,

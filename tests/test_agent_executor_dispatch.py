@@ -48,3 +48,27 @@ def test_missing_actions_token_fails_closed(monkeypatch) -> None:
     monkeypatch.delenv("HASSAN_GITHUB_ACTIONS_TOKEN", raising=False)
     result = dispatch_agent_execution("job-1234567890123456")
     assert result.status == "NOT_CONFIGURED"
+
+
+def test_missing_executor_ref_fails_closed(monkeypatch) -> None:
+    monkeypatch.setenv("HASSAN_GITHUB_ACTIONS_TOKEN", "token")
+    monkeypatch.delenv("HASSAN_AGENT_EXECUTOR_REF", raising=False)
+    client = FakeClient()
+
+    result = dispatch_agent_execution("job-1234567890123456", client=client)
+
+    assert result.status == "NOT_CONFIGURED"
+    assert "Candidate" in result.detail
+    assert client.url == ""
+
+
+def test_stable_executor_ref_is_forbidden(monkeypatch) -> None:
+    monkeypatch.setenv("HASSAN_GITHUB_ACTIONS_TOKEN", "token")
+    monkeypatch.setenv("HASSAN_AGENT_EXECUTOR_REF", "refs/heads/main")
+    client = FakeClient()
+
+    result = dispatch_agent_execution("job-1234567890123456", client=client)
+
+    assert result.status == "NOT_CONFIGURED"
+    assert "Stable/main" in result.detail
+    assert client.url == ""

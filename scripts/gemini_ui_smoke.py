@@ -134,7 +134,12 @@ def main() -> None:
     result = execute_tool("phone.command", arguments, job_id="smoke", project_id="smoke", phone=phone)
     if result.get("status") != "OK" or (result.get("data") or {}).get("status") != "COMPLETED":
         raise RuntimeError(f"Phone Agent PING failed: {result}")
-    transport.send("TOOL_RESULT=" + json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    result_json = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    transport.send(
+        "TOOL_RESULT=" + result_json + "\n"
+        "PROTOCOL REQUIREMENT: Do not explain or paraphrase this result. Your entire next reply must be exactly: "
+        'FRISHTA_FINAL:{"summary":"gemini-tool-gateway-ok"}'
+    )
     kind, payload = transport.await_protocol(timeout=120.0)
     if kind != "final":
         raise RuntimeError(f"expected FRISHTA_FINAL, got {kind}: {payload[:300]}")

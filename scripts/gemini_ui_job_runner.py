@@ -9,6 +9,7 @@ from pathlib import Path
 import httpx
 
 import gemini_ui_job as worker_module
+from gemini_ui_atomic_transport import install_atomic_transport
 from gemini_ui_hardening import install_runtime_hardening
 
 API_URL = os.environ.get("HASSAN_API_URL", "").rstrip("/")
@@ -112,6 +113,7 @@ def main() -> None:
         )
         return
     install_runtime_hardening()
+    install_atomic_transport()
     try:
         worker_module.run_gemini_ui_job(
             job_id=JOB_ID,

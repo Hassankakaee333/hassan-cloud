@@ -27,6 +27,7 @@ on:
       - "tests/test_agent_executor_workflow_contract.py"
       - "tests/test_device_identity.py"
       - "tests/test_device_identity_api.py"
+      - "tests/test_execution_attestation_contract.py"
       - ".github/workflows/hassan-job.yml"
       - ".github/workflows/agent-artifact-verify.yml"
       - ".github/workflows/agent-acp-benchmark.yml"
@@ -68,6 +69,7 @@ jobs:
           tests/test_agent_executor_workflow_contract.py
           tests/test_device_identity.py
           tests/test_device_identity_api.py
+          tests/test_execution_attestation_contract.py
       - name: Install cloud requirements and Codex SDK for API-shape validation
         run: pip install -r requirements.txt openai-codex
       - name: Verify Codex SDK surface without login or execution
@@ -145,3 +147,4 @@ jobs:
           tests/test_agent_executor_workflow_contract.py
           tests/test_device_identity.py
           tests/test_device_identity_api.py
+          tests/test_execution_attestation_contract.py

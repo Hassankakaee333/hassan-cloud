@@ -1,8 +1,8 @@
 """Pinned-device-signed Agent execution API with one-time private bundle delivery.
 
-P2.11 keeps the P2.9 signed execution boundary and P2.10 hash-only privacy audit, while making the
-trusted prepare bundle itself single-consumption. Cloud returns raw goal/file bytes only after an
-atomic claim and only after the raw Cloud artifact has been replaced by a durable hash-only audit.
+P2.12 keeps the P2.9 signed boundary plus P2.10/P2.11 privacy and one-time delivery, and additionally
+requires the authenticated bearer token to be bound to the same enrolled Android device before an
+Agent execution job can be created.
 """
 from __future__ import annotations
 
@@ -34,6 +34,7 @@ from .agent_executor_api import (
 )
 from .agent_verification_api import _callback_authorized, _find_job_artifact, _save_artifact
 from .device_identity import DeviceIdentityStore, verify_pinned_execution_signature
+from .device_token_binding import DeviceTokenBindingStore
 
 
 class SignedAgentExecutionRequest(AgentExecutionRequest):
@@ -65,6 +66,7 @@ def build_secure_agent_execution_router(
     router = APIRouter()
     identity_store = DeviceIdentityStore(repo)
     bundle_claims = AgentExecutionBundleClaimStore(repo)
+    token_bindings = DeviceTokenBindingStore(repo)
 
     @router.post("/v1/agent-executions")
     def create_agent_execution(body: SignedAgentExecutionRequest, _token: str = Depends(verify_token)) -> dict[str, Any]:
@@ -72,6 +74,10 @@ def build_secure_agent_execution_router(
             raise HTTPException(status_code=404, detail="project not found")
         _validate_request(body)
         _assert_prior_shadow_gate(repo, files, body)
+        try:
+            token_bindings.require_bound(_token, body.device_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         try:
             verify_pinned_execution_signature(
                 identity_store,
@@ -144,6 +150,7 @@ def build_secure_agent_execution_router(
             "repository": result.repository,
             "ref": result.ref,
             "device_identity_verified": True,
+            "bearer_device_binding_verified": True,
         }
 
     @router.get("/v1/agent-executions/{job_id}")
@@ -189,7 +196,6 @@ def build_secure_agent_execution_router(
             purge_private_artifact(repo, files, request_artifact)
         except Exception as exc:
             cleanup_error = f"{type(exc).__name__}:{exc}"[:240]
-            # The one-time claim is deliberately irreversible. Best-effort privacy cleanup follows.
             try:
                 if _find_job_artifact(repo, job, REQUEST_ARTIFACT) is not None:
                     purge_private_artifact(repo, files, request_artifact)

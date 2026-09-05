@@ -115,16 +115,27 @@ def payload():
     }
 
 
-def build_client(monkeypatch, signature_ok=True):
+def build_client(monkeypatch, signature_ok=True, token_binding_ok=True):
     repo = FakeRepo()
     files = FakeFiles()
     ids = iter([f"generated-{index}" for index in range(1, 30)])
     dispatches = {"count": 0}
 
+    class DummyDeviceTokenBindingStore:
+        def __init__(self, repo_arg):
+            self.repo = repo_arg
+
+        def require_bound(self, raw_token, device_id):
+            assert raw_token == "ok"
+            assert device_id == "phone-1"
+            if not token_binding_ok:
+                raise ValueError("bearer token is not bound to this device")
+
     monkeypatch.setattr(secure, "DeviceIdentityStore", DummyIdentityStore)
     monkeypatch.setattr(secure, "AgentExecutionBundleClaimStore", DummyBundleClaimStore)
+    monkeypatch.setattr(secure, "DeviceTokenBindingStore", DummyDeviceTokenBindingStore)
     monkeypatch.setattr(secure, "_validate_request", lambda body: [])
-    monkeypatch.setattr(secure, "_assert_prior_shadow_gate", lambda repo, files, body: None)
+    monkeypatch.setattr(secure, "_assert_prior_shadow_gate", lambda repo_arg, files_arg, body: None)
     monkeypatch.setattr(secure, "_callback_authorized", lambda secret: None)
 
     def verify_signature(store, device_id, body, signature):
@@ -161,6 +172,18 @@ def build_client(monkeypatch, signature_ok=True):
     return TestClient(app), dispatches, repo, files
 
 
+def test_wrong_device_bearer_blocks_job_before_dispatch(monkeypatch):
+    client, dispatches, _repo, _files = build_client(
+        monkeypatch,
+        signature_ok=True,
+        token_binding_ok=False,
+    )
+    response = client.post("/v1/agent-executions", json=payload())
+    assert response.status_code == 403
+    assert "not bound to this device" in response.text
+    assert dispatches["count"] == 0
+
+
 def test_invalid_device_signature_blocks_job_creation(monkeypatch):
     client, dispatches, _repo, _files = build_client(monkeypatch, signature_ok=False)
     response = client.post("/v1/agent-executions", json=payload())
@@ -173,6 +196,7 @@ def test_same_signed_permit_dispatches_at_most_once(monkeypatch):
     first = client.post("/v1/agent-executions", json=payload())
     assert first.status_code == 200, first.text
     assert first.json()["dispatch_status"] == "QUEUED"
+    assert first.json()["bearer_device_binding_verified"] is True
     second = client.post("/v1/agent-executions", json=payload())
     assert second.status_code == 200, second.text
     assert second.json()["dispatch_status"] == "EXISTING"

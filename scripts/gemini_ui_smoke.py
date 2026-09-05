@@ -3,17 +3,40 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 import gemini_ui_job as worker_module
 from gemini_ui_job import GeminiTransport, PhoneBridge, execute_tool
 
 _ORIGINAL_SEND_CENTER = worker_module._send_center
 _ORIGINAL_PHONE_COMMAND = PhoneBridge.command
+_ORIGINAL_PUT_PHONE_FILE = worker_module._put_phone_file
 
 
 def _bounds(line: str) -> tuple[int, int, int, int] | None:
     match = re.search(r"bounds=(\d+) (\d+) (\d+) (\d+)", line)
     return tuple(map(int, match.groups())) if match else None
+
+
+def _live_put_phone_file(path: str, value: dict, message: str) -> None:
+    """Retry only transient phone-control branch-head conflicts.
+
+    Phone Agent publishes status/outbox commits on the same branch. GitHub Contents API can reject
+    a concurrent create with 409 when that branch head moves between resolution and commit. Retrying
+    the same exact new inbox path is safe and does not broaden the worker's authority.
+    """
+    last: Exception | None = None
+    for attempt in range(8):
+        try:
+            _ORIGINAL_PUT_PHONE_FILE(path, value, message)
+            return
+        except RuntimeError as exc:
+            last = exc
+            if "GitHub HTTP 409" not in str(exc):
+                raise
+            time.sleep(0.5 + attempt * 0.35)
+    assert last is not None
+    raise last
 
 
 def _live_phone_command(
@@ -23,12 +46,7 @@ def _live_phone_command(
     *,
     timeout: float = 45.0,
 ) -> dict:
-    """Give the GitHub-backed Phone Agent enough time to publish its exact outbox result.
-
-    Bursty private-repo writes can take longer than the original 45-second window even after the
-    phone has consumed the inbox command. The smoke keeps exact command/result matching and merely
-    extends the bounded wait; it never accepts another command's result.
-    """
+    """Give the GitHub-backed Phone Agent enough time to publish its exact outbox result."""
     return _ORIGINAL_PHONE_COMMAND(self, action, args, timeout=max(float(timeout), 90.0))
 
 
@@ -69,19 +87,16 @@ def _live_send_center(tree: str) -> tuple[int, int] | None:
         cy = (y1 + y2) // 2
         if cy < ey1 - 60 or cy > ey2 + 60:
             continue
-        # The send control must sit immediately beside the composer, never over unrelated content.
         if x2 <= ex1:
             gap = ex1 - x2
         elif x1 >= ex2:
             gap = x1 - ex2
         else:
-            # Small controls can overlap the composer's container bounds at its edge.
             edge_distance = min(abs((x1 + x2) // 2 - ex1), abs((x1 + x2) // 2 - ex2))
             gap = edge_distance
         if gap > 260:
             continue
         cx = (x1 + x2) // 2
-        # Prefer controls nearest an editable horizontal edge, then smaller controls.
         score = gap * 1000 + width * height
         candidates.append((score, cx, cy))
 
@@ -93,7 +108,8 @@ def _live_send_center(tree: str) -> tuple[int, int] | None:
 
 def main() -> None:
     # Patch only this live smoke transport. Production remains fail-closed; after the proof these
-    # bounded transport hardenings can be promoted into the worker with the same tests.
+    # bounded transport hardenings are promoted into the worker with the same contract tests.
+    worker_module._put_phone_file = _live_put_phone_file
     worker_module._send_center = _live_send_center
     PhoneBridge.command = _live_phone_command
     phone = PhoneBridge()

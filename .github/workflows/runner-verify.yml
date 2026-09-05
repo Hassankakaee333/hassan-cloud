@@ -26,6 +26,7 @@ on:
       - "tests/test_agent_executor_secure_api.py"
       - "tests/test_agent_executor_workflow_contract.py"
       - "tests/test_agent_execution_privacy.py"
+      - "tests/test_agent_execution_bundle_claim.py"
       - "tests/test_device_identity.py"
       - "tests/test_device_identity_api.py"
       - "tests/test_execution_attestation_contract.py"
@@ -69,6 +70,7 @@ jobs:
           tests/test_agent_executor_secure_api.py
           tests/test_agent_executor_workflow_contract.py
           tests/test_agent_execution_privacy.py
+          tests/test_agent_execution_bundle_claim.py
           tests/test_device_identity.py
           tests/test_device_identity_api.py
           tests/test_execution_attestation_contract.py
@@ -148,6 +150,7 @@ jobs:
           tests/test_agent_executor_secure_api.py
           tests/test_agent_executor_workflow_contract.py
           tests/test_agent_execution_privacy.py
+          tests/test_agent_execution_bundle_claim.py
           tests/test_device_identity.py
           tests/test_device_identity_api.py
           tests/test_execution_attestation_contract.py

@@ -44,14 +44,22 @@ def main() -> None:
         project_id="smoke",
         phone=phone,
     )
-    if result.get("status") != "OK" or (result.get("data") or {}).get("status") != "COMPLETED":
+    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    if result.get("status") != "OK" or data.get("status") != "COMPLETED":
         raise RuntimeError(f"Phone Agent PING failed: {result}")
 
-    result_json = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    compact_result = {
+        "status": "OK",
+        "tool": "phone.command",
+        "data": {
+            "status": "COMPLETED",
+            "message": str(data.get("message") or "PING_OK")[:120],
+        },
+    }
+    result_json = json.dumps(compact_result, ensure_ascii=False, separators=(",", ":"))
     gemini.send(
         "TOOL_RESULT=" + result_json + "\n"
-        "The tool result has already been handled by Frishta. Return exactly this final status, "
-        "adding the required bound nonce field and no markdown or explanation: "
+        "Return exactly this final status with the required bound nonce and no markdown: "
         'FRISHTA_FINAL:{"summary":"gemini-tool-gateway-ok"}'
     )
     kind, payload = gemini.await_protocol()

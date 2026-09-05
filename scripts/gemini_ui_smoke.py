@@ -8,11 +8,28 @@ import gemini_ui_job as worker_module
 from gemini_ui_job import GeminiTransport, PhoneBridge, execute_tool
 
 _ORIGINAL_SEND_CENTER = worker_module._send_center
+_ORIGINAL_PHONE_COMMAND = PhoneBridge.command
 
 
 def _bounds(line: str) -> tuple[int, int, int, int] | None:
     match = re.search(r"bounds=(\d+) (\d+) (\d+) (\d+)", line)
     return tuple(map(int, match.groups())) if match else None
+
+
+def _live_phone_command(
+    self: PhoneBridge,
+    action: str,
+    args: dict | None = None,
+    *,
+    timeout: float = 45.0,
+) -> dict:
+    """Give the GitHub-backed Phone Agent enough time to publish its exact outbox result.
+
+    Bursty private-repo writes can take longer than the original 45-second window even after the
+    phone has consumed the inbox command. The smoke keeps exact command/result matching and merely
+    extends the bounded wait; it never accepts another command's result.
+    """
+    return _ORIGINAL_PHONE_COMMAND(self, action, args, timeout=max(float(timeout), 90.0))
 
 
 def _live_send_center(tree: str) -> tuple[int, int] | None:
@@ -75,9 +92,10 @@ def _live_send_center(tree: str) -> tuple[int, int] | None:
 
 
 def main() -> None:
-    # Patch only this live smoke transport. Production remains fail-closed; after the proof this
-    # helper can be promoted into the worker with the same tests.
+    # Patch only this live smoke transport. Production remains fail-closed; after the proof these
+    # bounded transport hardenings can be promoted into the worker with the same tests.
     worker_module._send_center = _live_send_center
+    PhoneBridge.command = _live_phone_command
     phone = PhoneBridge()
     transport = GeminiTransport(phone)
     prompt = (

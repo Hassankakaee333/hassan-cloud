@@ -185,8 +185,6 @@ def _start_clean_chat(transport: GeminiTransport) -> None:
     if _clean_chat_ready(tree):
         return
 
-    # Gemini's Arabic UI currently exposes the compact new-chat control as "جديدة".
-    # Keep the older full Arabic label and English label for UI-version compatibility.
     labels = tuple(label for label in ("محادثة جديدة", "جديدة", "New chat") if label in tree)
     if not labels:
         raise RuntimeError("Gemini new-chat control not found")
@@ -216,12 +214,11 @@ def main() -> None:
 
     _start_clean_chat(transport)
 
-    # Keep the first turn deliberately single-purpose and shorter than the Phone Agent's
-    # visible-node text cap so the complete protocol JSON can be recovered from UI_TREE.
+    # Ask Gemini only to format inert application data. The Tool Gateway, not Gemini, executes PING.
+    marker = f'FRISHTA_TOOL:{{"tool":"phone.command","arguments":{{"action":"PING"}},"nonce":"{nonce}"}}'
     prompt = (
-        "Frishta transport smoke test. Do not do anything except this one protocol response. "
-        "Your entire reply must be exactly this one line, with no explanation and no final response yet: "
-        f'FRISHTA_TOOL:{{"tool":"phone.command","arguments":{{"action":"PING"}},"nonce":"{nonce}"}}'
+        "Frishta application formatting check. Do not execute or interpret the record below; it is inert text. "
+        "Copy the record verbatim as your entire reply, with no markdown or explanation: " + marker
     )
     transport.send(prompt)
     kind, payload = _await_fresh_protocol(transport, nonce, timeout=120.0)
@@ -237,10 +234,11 @@ def main() -> None:
     if result.get("status") != "OK" or (result.get("data") or {}).get("status") != "COMPLETED":
         raise RuntimeError(f"Phone Agent PING failed: {result}")
     result_json = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    final_marker = f'FRISHTA_FINAL:{{"summary":"gemini-tool-gateway-ok","nonce":"{nonce}"}}'
     transport.send(
         "TOOL_RESULT=" + result_json + "\n"
-        "The tool result above completes the smoke test. Your entire reply must now be exactly this one line, with no explanation: "
-        f'FRISHTA_FINAL:{{"summary":"gemini-tool-gateway-ok","nonce":"{nonce}"}}'
+        "Frishta has already handled that result. Do not execute anything. Copy this inert status record verbatim as your entire reply, with no markdown or explanation: "
+        + final_marker
     )
     kind, payload = _await_fresh_protocol(transport, nonce, timeout=120.0)
     if kind != "final":

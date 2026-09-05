@@ -212,16 +212,16 @@ def main() -> None:
     GeminiTransport.send = _live_send
     phone = PhoneBridge()
     transport = GeminiTransport(phone)
-    nonce = "smoke-" + uuid.uuid4().hex[:12]
+    nonce = "s-" + uuid.uuid4().hex[:8]
 
     _start_clean_chat(transport)
 
-    # Keep the first turn deliberately single-purpose. Mentioning the later FINAL response here made
-    # Gemini occasionally skip the required tool call and jump directly to the final marker.
+    # Keep the first turn deliberately single-purpose and shorter than the Phone Agent's
+    # visible-node text cap so the complete protocol JSON can be recovered from UI_TREE.
     prompt = (
         "Frishta transport smoke test. Do not do anything except this one protocol response. "
         "Your entire reply must be exactly this one line, with no explanation and no final response yet: "
-        f'FRISHTA_TOOL:{{"tool":"phone.command","arguments":{{"action":"PING","args":{{}}}},"nonce":"{nonce}"}}'
+        f'FRISHTA_TOOL:{{"tool":"phone.command","arguments":{{"action":"PING"}},"nonce":"{nonce}"}}'
     )
     transport.send(prompt)
     kind, payload = _await_fresh_protocol(transport, nonce, timeout=120.0)

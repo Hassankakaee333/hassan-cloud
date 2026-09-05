@@ -1,12 +1,7 @@
-name: Gemini UI Tool Gateway Smoke (Experimental / One Shot)
+name: Gemini UI Tool Gateway Smoke (Experimental / Manual Only)
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - frishta-gemini-ui-worker-p2-15-20260905
-    paths:
-      - ".frishta-smoke-once"
 
 permissions:
   contents: read

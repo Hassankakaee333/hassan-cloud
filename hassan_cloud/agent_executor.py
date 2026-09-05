@@ -14,6 +14,7 @@ import httpx
 
 WORKFLOW_FILE = "agent-acp-task.yml"
 DEFAULT_REPO = "Hassankakaee333/hassan-cloud"
+_STABLE_REFS = {"main", "master", "stable"}
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,13 @@ class AgentExecutionDispatchResult:
     detail: str = ""
 
 
+def _is_stable_ref(ref: str) -> bool:
+    normalized = ref.strip().lower()
+    if normalized.startswith("refs/heads/"):
+        normalized = normalized.removeprefix("refs/heads/")
+    return normalized in _STABLE_REFS
+
+
 def dispatch_agent_execution(
     job_id: str,
     *,
@@ -35,7 +43,7 @@ def dispatch_agent_execution(
         raise ValueError("invalid job_id")
     token = os.environ.get("HASSAN_GITHUB_ACTIONS_TOKEN", "").strip()
     repository = os.environ.get("HASSAN_AGENT_EXECUTOR_REPO", DEFAULT_REPO).strip() or DEFAULT_REPO
-    ref = os.environ.get("HASSAN_AGENT_EXECUTOR_REF", "main").strip() or "main"
+    ref = os.environ.get("HASSAN_AGENT_EXECUTOR_REF", "").strip()
     if not token:
         return AgentExecutionDispatchResult(
             status="NOT_CONFIGURED",
@@ -46,6 +54,22 @@ def dispatch_agent_execution(
         )
     if repository.count("/") != 1:
         raise ValueError("invalid HASSAN_AGENT_EXECUTOR_REPO")
+    if not ref:
+        return AgentExecutionDispatchResult(
+            status="NOT_CONFIGURED",
+            job_id=job_id,
+            repository=repository,
+            ref=ref,
+            detail="HASSAN_AGENT_EXECUTOR_REF must explicitly target a Candidate branch or commit",
+        )
+    if _is_stable_ref(ref):
+        return AgentExecutionDispatchResult(
+            status="NOT_CONFIGURED",
+            job_id=job_id,
+            repository=repository,
+            ref=ref,
+            detail="Stable/main Agent executor refs are forbidden; configure an explicit Candidate branch or commit",
+        )
 
     payload = {"ref": ref, "inputs": {"job_id": job_id}}
     url = f"https://api.github.com/repos/{repository}/actions/workflows/{WORKFLOW_FILE}/dispatches"

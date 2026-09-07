@@ -6,6 +6,7 @@ on:
       - "scripts/**"
       - "tests/**"
       - "hassan_cloud/**"
+      - "requirements.txt"
       - ".github/workflows/hassan-job.yml"
       - ".github/workflows/runner-verify.yml"
 
@@ -30,7 +31,7 @@ jobs:
       - name: Compile runner Python
         run: python -m compileall -q scripts hassan_cloud tests
       - name: Install runner verification dependencies
-        run: pip install pytest openai-codex
+        run: pip install -r requirements.txt openai-codex
       - name: Verify Radar adapter request and secret isolation
         run: python -m pytest -q tests/test_radar_adapter_job.py
       - name: Prove reviewed Playwright Radar adapter on ephemeral runner

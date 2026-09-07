@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       job_type:
-        description: Job type (coding, general, android_build, workspace_coding, agentos_android, candidate_self_improve, codex_candidate_self_improve)
+        description: Job type (coding, general, android_build, workspace_coding, agentos_android, candidate_self_improve, codex_candidate_self_improve, radar_adapter)
         required: true
         type: string
 
@@ -34,6 +34,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Set up Node for reviewed Radar adapters
+        if: inputs.job_type == 'radar_adapter'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
 
       - name: Set up Java for Android builds
         if: inputs.job_type == 'android_build' || inputs.job_type == 'agentos_android' || inputs.job_type == 'candidate_self_improve' || inputs.job_type == 'codex_candidate_self_improve'

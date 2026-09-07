@@ -4,9 +4,15 @@ on:
   pull_request:
     paths:
       - "scripts/**"
+      - "tests/**"
       - "hassan_cloud/**"
+      - "requirements.txt"
       - ".github/workflows/hassan-job.yml"
       - ".github/workflows/runner-verify.yml"
+
+concurrency:
+  group: hassan-runner-verify-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -19,10 +25,41 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Compile runner Python
-        run: python -m compileall -q scripts hassan_cloud
-      - name: Install Codex SDK for API-shape validation only
-        run: pip install openai-codex
+        run: python -m compileall -q scripts hassan_cloud tests
+      - name: Install runner verification dependencies
+        run: pip install -r requirements.txt openai-codex
+      - name: Verify Radar adapter request and secret isolation
+        run: python -m pytest -q tests/test_radar_adapter_job.py
+      - name: Prove reviewed Playwright Radar adapter on ephemeral runner
+        env:
+          HASSAN_CALLBACK_SECRET: "must-not-reach-adapter-child"
+          GEMINI_API_KEY: "must-not-reach-adapter-child"
+          GITHUB_TOKEN_FOR_TEST: "must-not-reach-adapter-child"
+        run: |
+          python - <<'PY'
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          sys.path.insert(0, "scripts")
+          from radar_adapter_job import execute_playwright_smoke
+
+          report, screenshot, _install_log = execute_playwright_smoke(
+              Path(tempfile.mkdtemp(prefix="radar-adapter-ci-"))
+          )
+          assert report["status"] == "PASS"
+          assert report["local_page_interaction"] is True
+          assert report["offline_context"] is True
+          assert len(screenshot) > 0
+          print(
+              "Radar Playwright adapter: PASS; offline local page; "
+              f"browser={report.get('browser_version')}"
+          )
+          PY
       - name: Verify Codex SDK surface without login or execution
         run: |
           python - <<'PY'
